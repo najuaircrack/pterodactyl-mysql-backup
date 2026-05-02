@@ -1,0 +1,37 @@
+info:
+  name: "Pterodactyl MySQL Backup Manager"
+  identifier: "mysqlautobackup"
+  description: "Queue-driven, panel-integrated MySQL backup management for Pterodactyl servers"
+  flags: ""
+  version: "2.1.0"
+  target: "beta-2026-01"
+  author: "najuaircrack"
+  icon: "assets/icon.jpg"
+  website: "https://github.com/najuaircrack"
+
+admin:
+  view: "view.blade.php"
+  controller: ""
+  css: ""
+  wrapper: ""
+
+dashboard:
+  css: ""
+  wrapper: ""
+  components: "components"
+
+data:
+  directory: "private"
+  public: ""
+  console: ""
+
+requests:
+  views: ""
+  app: "controllers"
+  routers:
+    application: ""
+    client: "routes.php"
+    web: "web_routes.php"
+
+database:
+  migrations: "migrations"

@@ -1,0 +1,84 @@
+Navigation:
+  NavigationBar:
+    BeforeNavigation: ""
+    AdditionalItems: ""
+    AfterNavigation: ""
+  SubNavigation:
+    BeforeSubNavigation: ""
+    AdditionalServerItems: ""
+    AdditionalAccountItems: ""
+    AfterSubNavigation: ""
+
+Dashboard:
+  Global:
+    BeforeSection: "" # beta-2024-12 and later
+    AfterSection: "" # beta-2024-12 and later
+  Serverlist:
+    BeforeContent: ""
+    AfterContent: ""
+    ServerRow:
+      BeforeEntryName: ""
+      AfterEntryName: ""
+      BeforeEntryDescription: ""
+      AfterEntryDescription: ""
+      ResourceLimits: ""
+
+Authentication:
+  Container:
+    BeforeContent: ""
+    AfterContent: ""
+
+Account:
+  Overview:
+    BeforeContent: ""
+    AfterContent: ""
+  API:
+    BeforeContent: ""
+    AfterContent: ""
+  SSH:
+    BeforeContent: ""
+    AfterContent: ""
+
+Server:
+  Terminal:
+    BeforeContent: ""
+    AdditionalPowerButtons: ""
+    BeforeInformation: ""
+    AfterInformation: ""
+    CommandRow: ""
+    AfterContent: ""
+  Files:
+    Browse:
+      BeforeContent: ""
+      FileButtons: ""
+      DropdownItems: ""
+      AfterContent: ""
+    Edit:
+      BeforeEdit: ""
+      AfterEdit: ""
+  Databases:
+    BeforeContent: ""
+    AfterContent: "backupcomponent"
+  Schedules:
+    List:
+      BeforeContent: ""
+      AfterContent: ""
+    Edit:
+      BeforeEdit: ""
+      AfterEdit: ""
+  Users:
+    BeforeContent: ""
+    AfterContent: ""
+  Backups:
+    BeforeContent: ""
+    DropdownItems: ""
+    AfterContent: ""
+  Network:
+    BeforeContent: ""
+    AfterContent: ""
+  Startup:
+    BeforeContent: ""
+    AfterContent: ""
+  Settings:
+    BeforeContent: ""
+    AfterContent: ""
