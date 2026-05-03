@@ -4,6 +4,7 @@ Queue-driven, panel-native MySQL backups for Pterodactyl, packaged as a Blueprin
 
 Made by [@najuaircrack](https://github.com/najuaircrack).
 
+![MySQL Backup Manager](./assets/illustraion.png)
 ## What It Does
 
 - Runs MySQL backups through Laravel queues, not external cron scripts.
