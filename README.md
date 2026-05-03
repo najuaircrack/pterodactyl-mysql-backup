@@ -104,7 +104,7 @@ Users connect their own Google Drive directly through OAuth. Backups upload stra
 5. Under **Authorized redirect URIs**, click **+ Add URI** and enter:
 
 ```
-https://game.example.in/api/client/extensions/mysqlautobackup/google-oauth/callback
+https://game.example.in/api/client/extensions/mysqlautobackup/mysql-backups/google-oauth/callback
 ```
 
 > Replace `game.example.in` with your actual panel domain. Do **not** add a trailing slash.
