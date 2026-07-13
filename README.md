@@ -91,8 +91,8 @@ systemctl restart pteroq
 Clone the repo into your Blueprint development directory and build from source:
 
 ```bash
-cd /var/www/pterodactyl/blueprint/dev
-git clone https://github.com/najuaircrack/pterodactyl-mysql-backup.git mysqlautobackup
+cd /var/www/pterodactyl/.blueprint/dev
+git clone https://github.com/najuaircrack/pterodactyl-mysql-backup.git .
 
 # If Blueprint developer mode is not enabled, enable it:
 export is_developer=0
