@@ -106,8 +106,8 @@ class MysqlBackupStorageManager
     {
         $config = $provider->getConfig();
 
-        if (in_array($provider->driver, $this->rcloneDrivers(), true)) {
-            throw new RuntimeException('The rclone provider is stream-based and does not expose a Laravel disk.');
+        if (in_array($provider->driver, $this->streamBasedDrivers(), true)) {
+            throw new RuntimeException('The ' . $provider->driver . ' provider is stream-based and does not expose a Laravel disk.');
         }
 
         return match (true) {
@@ -160,6 +160,21 @@ class MysqlBackupStorageManager
             return;
         }
 
+        if ($provider->driver === 'dropbox') {
+            app(DropboxOAuthService::class)->upload($provider, $path, $stream);
+            return;
+        }
+
+        if ($provider->driver === 'onedrive') {
+            app(OneDriveOAuthService::class)->upload($provider, $path, $stream);
+            return;
+        }
+
+        if ($provider->driver === 'webdav') {
+            $this->putWebdavStream($provider, $path, $stream);
+            return;
+        }
+
         if (in_array($provider->driver, $this->rcloneDrivers(), true)) {
             $this->putRcloneStream($provider, $path, $stream);
             return;
@@ -178,6 +193,18 @@ class MysqlBackupStorageManager
             return app(GoogleDriveOAuthService::class)->download($provider, $path);
         }
 
+        if ($provider->driver === 'dropbox') {
+            return app(DropboxOAuthService::class)->download($provider, $path);
+        }
+
+        if ($provider->driver === 'onedrive') {
+            return app(OneDriveOAuthService::class)->download($provider, $path);
+        }
+
+        if ($provider->driver === 'webdav') {
+            return $this->readWebdavStream($provider, $path);
+        }
+
         if (in_array($provider->driver, $this->rcloneDrivers(), true)) {
             return $this->readRcloneStream($provider, $path);
         }
@@ -189,6 +216,21 @@ class MysqlBackupStorageManager
     {
         if ($provider->driver === 'google_drive') {
             app(GoogleDriveOAuthService::class)->delete($provider, $path);
+            return;
+        }
+
+        if ($provider->driver === 'dropbox') {
+            app(DropboxOAuthService::class)->delete($provider, $path);
+            return;
+        }
+
+        if ($provider->driver === 'onedrive') {
+            app(OneDriveOAuthService::class)->delete($provider, $path);
+            return;
+        }
+
+        if ($provider->driver === 'webdav') {
+            $this->deleteWebdavFile($provider, $path);
             return;
         }
 
@@ -221,16 +263,24 @@ class MysqlBackupStorageManager
     public function rcloneDrivers(): array
     {
         return [
-            'google_drive',
-            'onedrive',
-            'dropbox',
             'box',
             'mega',
             'pcloud',
             'yandex_disk',
-            'webdav',
             'rclone',
         ];
+    }
+
+    /**
+     * All drivers handled by custom stream methods (OAuth services, native
+     * WebDAV, or the rclone binary) rather than a Laravel filesystem disk.
+     */
+    public function streamBasedDrivers(): array
+    {
+        return array_merge(
+            ['google_drive', 'dropbox', 'onedrive', 'webdav'],
+            $this->rcloneDrivers(),
+        );
     }
 
     public function storageDriverLabels(): array
@@ -243,7 +293,7 @@ class MysqlBackupStorageManager
             'mega' => 'MEGA',
             'pcloud' => 'pCloud',
             'yandex_disk' => 'Yandex Disk',
-            'webdav' => 'WebDAV via rclone',
+            'webdav' => 'WebDAV',
             'rclone' => 'Other rclone remote',
             's3' => 'S3 compatible',
             'aws_s3' => 'AWS S3',
@@ -322,6 +372,140 @@ class MysqlBackupStorageManager
         }
 
         return $root;
+    }
+
+    private function putWebdavStream(MysqlBackupStorageProvider $provider, string $path, mixed $stream): void
+    {
+        $url = $this->webdavUrl($provider, $path);
+        $auth = $this->webdavAuth($provider);
+
+        // Ensure parent directories exist via MKCOL (best-effort, ignore errors).
+        $this->webdavEnsureParents($provider, $path, $auth);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CUSTOMREQUEST  => 'PUT',
+            CURLOPT_UPLOAD         => true,
+            CURLOPT_INFILE         => $stream,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/octet-stream'],
+            CURLOPT_USERPWD        => $auth,
+            CURLOPT_TIMEOUT        => 3600,
+        ]);
+        $raw    = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($status >= 400) {
+            throw new RuntimeException('WebDAV upload failed (HTTP ' . $status . '): ' . mb_substr((string) $raw, 0, 1000));
+        }
+    }
+
+    private function readWebdavStream(MysqlBackupStorageProvider $provider, string $path): mixed
+    {
+        $handle = tmpfile();
+
+        if ($handle === false) {
+            throw new RuntimeException('Unable to create a temporary file for WebDAV download.');
+        }
+
+        $url = $this->webdavUrl($provider, $path);
+        $auth = $this->webdavAuth($provider);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_FILE           => $handle,
+            CURLOPT_USERPWD        => $auth,
+            CURLOPT_TIMEOUT        => 3600,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        $ok     = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if (!$ok || $status >= 400) {
+            fclose($handle);
+            throw new RuntimeException('WebDAV download failed (HTTP ' . $status . ').');
+        }
+
+        rewind($handle);
+
+        return $handle;
+    }
+
+    private function deleteWebdavFile(MysqlBackupStorageProvider $provider, string $path): void
+    {
+        $url = $this->webdavUrl($provider, $path);
+        $auth = $this->webdavAuth($provider);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CUSTOMREQUEST  => 'DELETE',
+            CURLOPT_USERPWD        => $auth,
+            CURLOPT_TIMEOUT        => 60,
+        ]);
+        curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        // 404 = already gone, that's fine
+        if ($status !== 204 && $status !== 200 && $status !== 404) {
+            throw new RuntimeException('WebDAV delete failed (HTTP ' . $status . ').');
+        }
+    }
+
+    private function webdavUrl(MysqlBackupStorageProvider $provider, string $path): string
+    {
+        $config = $provider->getConfig();
+        $base = rtrim((string) ($config['url'] ?? ''), '/');
+
+        if ($base === '') {
+            throw new RuntimeException('WebDAV provider is missing the base URL.');
+        }
+
+        $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
+
+        return $base . '/' . implode('/', array_map('rawurlencode', explode('/', $cleanPath)));
+    }
+
+    private function webdavAuth(MysqlBackupStorageProvider $provider): string
+    {
+        $config = $provider->getConfig();
+        $user = (string) ($config['username'] ?? '');
+        $pass = (string) ($config['password'] ?? '');
+
+        return $user . ':' . $pass;
+    }
+
+    private function webdavEnsureParents(MysqlBackupStorageProvider $provider, string $path, string $auth): void
+    {
+        $config = $provider->getConfig();
+        $base = rtrim((string) ($config['url'] ?? ''), '/');
+        $parent = dirname($path);
+
+        if ($parent === '.' || $parent === '/') {
+            return;
+        }
+
+        $segments = array_filter(explode('/', str_replace('\\', '/', $parent)));
+        $current = $base;
+
+        foreach ($segments as $segment) {
+            $current .= '/' . rawurlencode($segment);
+
+            $ch = curl_init($current);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST  => 'MKCOL',
+                CURLOPT_USERPWD        => $auth,
+                CURLOPT_TIMEOUT        => 15,
+                CURLOPT_NOBODY         => false,
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        }
     }
 
     private function putRcloneStream(MysqlBackupStorageProvider $provider, string $path, mixed $stream): void

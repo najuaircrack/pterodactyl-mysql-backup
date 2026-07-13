@@ -37,7 +37,10 @@ class MysqlDumpService
             '--triggers',
             '--hex-blob',
             '--no-tablespaces',
-            '--databases',
+            // Dump the single database positionally (NOT --databases) so the dump
+            // contains no CREATE DATABASE/USE statements. That keeps it portable:
+            // a restore is applied to whichever database `mysql` connects to,
+            // allowing a backup to be restored into a different target database.
             $database->database,
         ];
 

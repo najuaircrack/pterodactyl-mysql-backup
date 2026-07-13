@@ -96,6 +96,7 @@ interface BackupLimits {
     max_concurrent_server_jobs: number;
     allow_server_providers: boolean;
     allowed_drivers: string[];
+    oauth_providers: string[];
 }
 
 interface BackupQuota {
@@ -130,15 +131,18 @@ const s3LikeDrivers = [
     'google_cloud_storage',
 ];
 const rcloneDrivers = [
-    'onedrive',
-    'dropbox',
     'box',
     'mega',
     'pcloud',
     'yandex_disk',
-    'webdav',
     'rclone',
 ];
+const oauthDrivers = [
+    'google_drive',
+    'dropbox',
+    'onedrive',
+];
+const webdavDriver = 'webdav';
 const storageDriverLabels: Record<string, string> = {
     google_drive: 'Google Drive',
     onedrive: 'OneDrive',
@@ -147,7 +151,7 @@ const storageDriverLabels: Record<string, string> = {
     mega: 'MEGA',
     pcloud: 'pCloud',
     yandex_disk: 'Yandex Disk',
-    webdav: 'WebDAV via rclone',
+    webdav: 'WebDAV',
     rclone: 'Other rclone remote',
     s3: 'S3 compatible',
     aws_s3: 'AWS S3',
@@ -215,6 +219,7 @@ const MysqlAutoBackupComponent = () => {
     const [restoreTarget, setRestoreTarget] = useState<Record<string, number | ''>>({});
     const [providerFormOpen, setProviderFormOpen] = useState(false);
     const [deletingProviderId, setDeletingProviderId] = useState<number | null>(null);
+    const [deletingBackupUuid, setDeletingBackupUuid] = useState<string | null>(null);
     const [providerForm, setProviderForm] = useState({
         name: '',
         driver: 'google_drive',
@@ -230,10 +235,8 @@ const MysqlAutoBackupComponent = () => {
         password: '',
         remote: 'gdrive:pterodactyl/mysql-backups',
         rclone_config: '',
-        gdrive_client_id: '',
-        gdrive_client_secret: '',
-        gdrive_connecting: false,
-        gdrive_connected: false,
+        webdav_url: '',
+        oauth_connecting: false,
     });
 
     const loadAll = () => {
@@ -273,10 +276,12 @@ const MysqlAutoBackupComponent = () => {
     }, [uuid, page]);
 
     useEffect(() => {
-        const addableDrivers = limits?.allowed_drivers.filter((driver) => driver !== 'local') || [];
-        if (!limits || addableDrivers.includes(providerForm.driver)) return;
+        const drivers = (limits?.allowed_drivers || [])
+            .filter((d) => d !== 'local')
+            .filter((d) => !oauthDrivers.includes(d) || (limits?.oauth_providers || []).includes(d));
+        if (!limits || drivers.includes(providerForm.driver)) return;
 
-        setProviderForm({ ...providerForm, driver: addableDrivers[0] || 'google_drive' });
+        setProviderForm({ ...providerForm, driver: drivers[0] || 'google_drive' });
     }, [limits, providerForm.driver]);
 
     const selectedDatabaseIds = config?.database_ids?.length ? config.database_ids : databases.map((database) => database.id);
@@ -301,7 +306,9 @@ const MysqlAutoBackupComponent = () => {
     const quotaPercent = quota?.server_quota_bytes
         ? Math.min(100, Math.round((quota.server_used_bytes / quota.server_quota_bytes) * 100))
         : 0;
-    const addableDrivers = limits?.allowed_drivers.filter((driver) => driver !== 'local') || [];
+    const addableDrivers = (limits?.allowed_drivers || [])
+        .filter((driver) => driver !== 'local')
+        .filter((driver) => !oauthDrivers.includes(driver) || (limits?.oauth_providers || []).includes(driver));
 
     const updateConfig = (patch: Partial<BackupConfiguration>) => {
         if (!config) return;
@@ -378,27 +385,40 @@ const MysqlAutoBackupComponent = () => {
         }
     };
 
-    const connectGoogleDrive = (event: FormEvent) => {
+    const deleteBackup = (record: BackupRecord) => {
+        if (deletingBackupUuid === record.uuid) {
+            // Second click — confirmed, do the delete
+            axios
+                .delete(`${baseUrl}/${record.uuid}`)
+                .then(() => {
+                    setDeletingBackupUuid(null);
+                    return loadAll();
+                })
+                .catch((error) => setError(error.response?.data?.error || 'Failed to delete backup.'));
+        } else {
+            // First click — ask for confirmation
+            setDeletingBackupUuid(record.uuid);
+        }
+    };
+
+    const connectOAuth = (event: FormEvent) => {
         event.preventDefault();
-        if (!providerForm.name || !providerForm.gdrive_client_id || !providerForm.gdrive_client_secret) {
-            setError('Enter a name, Client ID and Client Secret before connecting.');
+        if (!providerForm.name) {
+            setError('Enter a provider name before connecting.');
             return;
         }
-        setProviderForm((f) => ({ ...f, gdrive_connecting: true }));
+        setProviderForm((f) => ({ ...f, oauth_connecting: true }));
         setSaving(true);
         axios
-            .post(`${baseUrl}/google-oauth/prepare`, {
+            .post(`${baseUrl}/oauth/${providerForm.driver}/prepare`, {
                 name: providerForm.name,
-                client_id: providerForm.gdrive_client_id,
-                client_secret: providerForm.gdrive_client_secret,
             })
             .then(({ data }) => {
-                // Open consent screen in a popup
-                const popup = window.open(data.redirect_url, 'gdrive_oauth', 'width=600,height=700');
+                const popup = window.open(data.redirect_url, 'oauth_popup', 'width=600,height=700');
                 const timer = setInterval(() => {
                     if (popup && popup.closed) {
                         clearInterval(timer);
-                        setProviderForm((f) => ({ ...f, gdrive_connecting: false, gdrive_connected: true }));
+                        setProviderForm((f) => ({ ...f, oauth_connecting: false }));
                         setSaving(false);
                         setProviderFormOpen(false);
                         loadAll();
@@ -406,8 +426,8 @@ const MysqlAutoBackupComponent = () => {
                 }, 500);
             })
             .catch((error) => {
-                setError(error.response?.data?.error || 'Failed to start Google OAuth.');
-                setProviderForm((f) => ({ ...f, gdrive_connecting: false }));
+                setError(error.response?.data?.error || 'Failed to start OAuth.');
+                setProviderForm((f) => ({ ...f, oauth_connecting: false }));
                 setSaving(false);
             });
     };
@@ -424,6 +444,12 @@ const MysqlAutoBackupComponent = () => {
                       key: providerForm.key,
                       secret: providerForm.secret,
                       path_style: true,
+                  }
+                : driver === webdavDriver
+                ? {
+                      url: providerForm.webdav_url,
+                      username: providerForm.username,
+                      password: providerForm.password,
                   }
                 : rcloneDrivers.includes(driver)
                 ? { remote: providerForm.remote, rclone_config: providerForm.rclone_config }
@@ -755,22 +781,71 @@ const MysqlAutoBackupComponent = () => {
                                         </option>
                                     ))}
                                 </select>
-                                <input
-                                    css={inputStyle}
-                                    placeholder={rcloneDrivers.includes(providerForm.driver) ? 'rclone remote:path' : s3LikeDrivers.includes(providerForm.driver) ? 'Bucket' : 'Root path'}
-                                    value={rcloneDrivers.includes(providerForm.driver) ? providerForm.remote : s3LikeDrivers.includes(providerForm.driver) ? providerForm.bucket : providerForm.root}
-                                    onChange={(event) =>
-                                        setProviderForm(
-                                            rcloneDrivers.includes(providerForm.driver)
-                                                ? { ...providerForm, remote: event.target.value }
-                                                : s3LikeDrivers.includes(providerForm.driver)
-                                                ? { ...providerForm, bucket: event.target.value }
-                                                : { ...providerForm, root: event.target.value }
-                                        )
-                                    }
-                                />
-                                {!rcloneDrivers.includes(providerForm.driver) && (
+                                {/* OAuth drivers: one-click connect, no manual fields */}
+                                {oauthDrivers.includes(providerForm.driver) && (
+                                    <div css={tw`md:col-span-3`}>
+                                        <div css={tw`mb-3 text-xs text-neutral-400`}>
+                                            Click the button below and authorise the app. Your backups will be uploaded to your own {storageDriverLabels[providerForm.driver]} account — no client ID or secret needed.
+                                        </div>
+                                        <Button
+                                            type={'button'}
+                                            disabled={saving || !providerForm.name}
+                                            onClick={connectOAuth}
+                                        >
+                                            {providerForm.oauth_connecting
+                                                ? 'Connecting…'
+                                                : `Connect ${storageDriverLabels[providerForm.driver]}`}
+                                        </Button>
+                                    </div>
+                                )}
+
+                                {/* WebDAV: URL + credentials */}
+                                {providerForm.driver === webdavDriver && (
                                     <>
+                                        <input
+                                            css={inputStyle}
+                                            placeholder={'WebDAV URL (https://dav.example.com/backups)'}
+                                            value={providerForm.webdav_url}
+                                            onChange={(event) => setProviderForm({ ...providerForm, webdav_url: event.target.value })}
+                                        />
+                                        <input
+                                            css={inputStyle}
+                                            placeholder={'Username'}
+                                            value={providerForm.username}
+                                            onChange={(event) => setProviderForm({ ...providerForm, username: event.target.value })}
+                                        />
+                                        <input
+                                            css={inputStyle}
+                                            type={'password'}
+                                            placeholder={'Password'}
+                                            value={providerForm.password}
+                                            onChange={(event) => setProviderForm({ ...providerForm, password: event.target.value })}
+                                        />
+                                        <div css={tw`md:col-span-3`}>
+                                            <Button type={'submit'} disabled={saving || !providerForm.name || !providerForm.webdav_url}>
+                                                Save Provider
+                                            </Button>
+                                        </div>
+                                    </>
+                                )}
+
+                                {/* S3-like + FTP/FTPS/SFTP: manual credential fields */}
+                                {!oauthDrivers.includes(providerForm.driver) &&
+                                    providerForm.driver !== webdavDriver &&
+                                    !rcloneDrivers.includes(providerForm.driver) && (
+                                    <>
+                                        <input
+                                            css={inputStyle}
+                                            placeholder={s3LikeDrivers.includes(providerForm.driver) ? 'Bucket' : 'Root path'}
+                                            value={s3LikeDrivers.includes(providerForm.driver) ? providerForm.bucket : providerForm.root}
+                                            onChange={(event) =>
+                                                setProviderForm(
+                                                    s3LikeDrivers.includes(providerForm.driver)
+                                                        ? { ...providerForm, bucket: event.target.value }
+                                                        : { ...providerForm, root: event.target.value }
+                                                )
+                                            }
+                                        />
                                         <input
                                             css={inputStyle}
                                             placeholder={s3LikeDrivers.includes(providerForm.driver) ? 'Endpoint' : 'Host'}
@@ -808,64 +883,35 @@ const MysqlAutoBackupComponent = () => {
                                                 )
                                             }
                                         />
-                                    </>
-                                )}
-                                {providerForm.driver === 'google_drive' && (
-                                    <>
-                                        <input
-                                            css={inputStyle}
-                                            placeholder={'OAuth Client ID (from Google Cloud Console)'}
-                                            value={providerForm.gdrive_client_id}
-                                            onChange={(event) => setProviderForm({ ...providerForm, gdrive_client_id: event.target.value })}
-                                        />
-                                        <input
-                                            css={inputStyle}
-                                            placeholder={'OAuth Client Secret'}
-                                            type={'password'}
-                                            value={providerForm.gdrive_client_secret}
-                                            onChange={(event) => setProviderForm({ ...providerForm, gdrive_client_secret: event.target.value })}
-                                        />
-                                        <div css={tw`md:col-span-3 text-xs text-neutral-400`}>
-                                            Create credentials at{' '}
-                                            <a
-                                                href={'https://console.cloud.google.com/apis/credentials'}
-                                                target={'_blank'}
-                                                rel={'noreferrer'}
-                                                css={tw`text-cyan-400 underline`}
-                                            >
-                                                console.cloud.google.com
-                                            </a>
-                                            {' '}→ OAuth 2.0 Client ID (Web application). Enable the Google Drive API. Add{' '}
-                                            <code css={tw`bg-neutral-800 px-1 rounded`}>
-                                                {window.location.origin}/api/client/mysql-backups/google-oauth/callback
-                                            </code>
-                                            {' '}as an Authorized redirect URI.
-                                        </div>
                                         <div css={tw`md:col-span-3`}>
-                                            <Button
-                                                type={'button'}
-                                                disabled={saving || !providerForm.name || !providerForm.gdrive_client_id || !providerForm.gdrive_client_secret}
-                                                onClick={connectGoogleDrive}
-                                            >
-                                                {providerForm.gdrive_connecting ? 'Connecting…' : 'Connect Google Drive'}
+                                            <Button type={'submit'} disabled={saving || !providerForm.name}>
+                                                Save Provider
                                             </Button>
                                         </div>
                                     </>
                                 )}
+
+                                {/* rclone-only drivers: remote + config */}
                                 {rcloneDrivers.includes(providerForm.driver) && (
-                                    <textarea
-                                        css={[inputStyle, tw`h-32 md:col-span-3`]}
-                                        placeholder={'Optional encrypted rclone config block'}
-                                        value={providerForm.rclone_config}
-                                        onChange={(event) => setProviderForm({ ...providerForm, rclone_config: event.target.value })}
-                                    />
-                                )}
-                                {providerForm.driver !== 'google_drive' && (
-                                <div css={tw`md:col-span-3`}>
-                                    <Button type={'submit'} disabled={saving || !providerForm.name}>
-                                        Save Provider
-                                    </Button>
-                                </div>
+                                    <>
+                                        <input
+                                            css={inputStyle}
+                                            placeholder={'rclone remote:path'}
+                                            value={providerForm.remote}
+                                            onChange={(event) => setProviderForm({ ...providerForm, remote: event.target.value })}
+                                        />
+                                        <textarea
+                                            css={[inputStyle, tw`h-32 md:col-span-3`]}
+                                            placeholder={'Optional encrypted rclone config block'}
+                                            value={providerForm.rclone_config}
+                                            onChange={(event) => setProviderForm({ ...providerForm, rclone_config: event.target.value })}
+                                        />
+                                        <div css={tw`md:col-span-3`}>
+                                            <Button type={'submit'} disabled={saving || !providerForm.name}>
+                                                Save Provider
+                                            </Button>
+                                        </div>
+                                    </>
                                 )}
                             </form>
                         )}
@@ -982,6 +1028,25 @@ const MysqlAutoBackupComponent = () => {
                                                         >
                                                             <FontAwesomeIcon icon={faUndo} fixedWidth />
                                                         </Button>
+                                                        <button
+                                                            type={'button'}
+                                                            css={[
+                                                                tw`rounded px-2 py-1 text-xs font-medium transition-colors`,
+                                                                deletingBackupUuid === record.uuid
+                                                                    ? tw`bg-red-600 text-white`
+                                                                    : tw`bg-neutral-700 text-neutral-300 hover:bg-red-700 hover:text-white`,
+                                                                (record.status === 'running' || record.status === 'restoring') && tw`opacity-40 cursor-not-allowed`,
+                                                            ]}
+                                                            onClick={() => deleteBackup(record)}
+                                                            disabled={record.status === 'running' || record.status === 'restoring'}
+                                                            title={deletingBackupUuid === record.uuid ? 'Click again to confirm deletion' : 'Delete backup'}
+                                                        >
+                                                            {deletingBackupUuid === record.uuid ? (
+                                                                'Confirm?'
+                                                            ) : (
+                                                                <FontAwesomeIcon icon={faTrash} fixedWidth />
+                                                            )}
+                                                        </button>
                                                     </div>
                                                 </div>
                                             </GreyRowBox>

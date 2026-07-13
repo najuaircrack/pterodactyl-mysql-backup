@@ -68,6 +68,13 @@ class MysqlBackupAdminController extends Controller
             'runtime.dump_username' => ['nullable', 'string', 'max:255'],
             'runtime.dump_password' => ['nullable', 'string', 'max:2048'],
             'runtime.dump_host' => ['nullable', 'string', 'max:255'],
+            'oauth.google_drive.client_id' => ['nullable', 'string', 'max:500'],
+            'oauth.google_drive.client_secret' => ['nullable', 'string', 'max:500'],
+            'oauth.dropbox.client_id' => ['nullable', 'string', 'max:500'],
+            'oauth.dropbox.client_secret' => ['nullable', 'string', 'max:500'],
+            'oauth.onedrive.client_id' => ['nullable', 'string', 'max:500'],
+            'oauth.onedrive.client_secret' => ['nullable', 'string', 'max:500'],
+            'oauth.onedrive.tenant' => ['nullable', 'string', 'max:100'],
         ])->validate();
 
         $data['policy']['default_enabled'] = $request->boolean('policy.default_enabled');
@@ -102,6 +109,17 @@ class MysqlBackupAdminController extends Controller
         $data['providers']['allow_ftps'] = $request->boolean('providers.allow_ftps');
         $data['providers']['allow_sftp'] = $request->boolean('providers.allow_sftp');
 
+        // Preserve admin OAuth app credentials. Empty secrets are replaced
+        // with the previously stored value so the admin can update just the
+        // client id without re-entering the secret each time.
+        $currentSettings = $settings->get();
+        foreach (['google_drive', 'dropbox', 'onedrive'] as $oauthProvider) {
+            $secretKey = 'oauth.' . $oauthProvider . '.client_secret';
+            if (($data['oauth'][$oauthProvider]['client_secret'] ?? '') === '') {
+                $data['oauth'][$oauthProvider]['client_secret'] = $currentSettings['oauth'][$oauthProvider]['client_secret'] ?? '';
+            }
+        }
+
         $providerId = $data['providers']['default_storage_provider_id'] ?? null;
         if ($providerId && !MysqlBackupStorageProvider::query()->where('id', $providerId)->where('is_global', true)->exists()) {
             return back()->withErrors(['providers.default_storage_provider_id' => 'Default storage must be a global provider.']);
@@ -111,6 +129,11 @@ class MysqlBackupAdminController extends Controller
         if (($data['runtime']['dump_password'] ?? '') === '') {
             $currentSettings = $scopeServerId ? $settings->getForServer((int) $scopeServerId) : $settings->get();
             $data['runtime']['dump_password'] = $currentSettings['runtime']['dump_password'] ?? '';
+        }
+
+        // OAuth app credentials are global — never persisted per-server.
+        if ($scopeServerId) {
+            unset($data['oauth']);
         }
 
         if ($scopeServerId) {
@@ -229,7 +252,11 @@ class MysqlBackupAdminController extends Controller
             's3', 'aws_s3', 'cloudflare_r2', 'minio', 'wasabi', 'backblaze_b2', 'digitalocean_spaces', 'linode_object_storage', 'vultr_object_storage', 'scaleway_object_storage', 'oracle_object_storage', 'google_cloud_storage' => ['key', 'secret', 'region', 'bucket', 'endpoint', 'path_style'],
             'ftp', 'ftps' => ['host', 'username', 'password', 'port', 'root', 'ssl', 'passive', 'timeout'],
             'sftp' => ['host', 'username', 'password', 'private_key', 'passphrase', 'port', 'root', 'timeout'],
-            'google_drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex_disk', 'webdav', 'rclone' => ['remote', 'rclone_config'],
+            'google_drive' => ['gdrive_client_id', 'gdrive_client_secret', 'gdrive_refresh_token', 'gdrive_access_token', 'gdrive_token_expiry'],
+            'dropbox' => ['dropbox_refresh_token', 'dropbox_access_token', 'dropbox_token_expiry'],
+            'onedrive' => ['onedrive_refresh_token', 'onedrive_access_token', 'onedrive_token_expiry'],
+            'webdav' => ['url', 'username', 'password'],
+            'box', 'mega', 'pcloud', 'yandex_disk', 'rclone' => ['remote', 'rclone_config'],
             default => ['root'],
         };
 
@@ -238,7 +265,29 @@ class MysqlBackupAdminController extends Controller
 
     private function providerConfigError(string $driver, array $config): ?string
     {
-        if (in_array($driver, ['google_drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex_disk', 'webdav', 'rclone'], true)) {
+        if (in_array($driver, ['google_drive', 'dropbox', 'onedrive'], true)) {
+            $tokenKey = match ($driver) {
+                'google_drive' => 'gdrive_refresh_token',
+                'dropbox'      => 'dropbox_refresh_token',
+                'onedrive'     => 'onedrive_refresh_token',
+            };
+
+            if (empty($config[$tokenKey])) {
+                return ucfirst(str_replace('_', ' ', $driver)) . ' must be connected via OAuth from the server backup page.';
+            }
+
+            return null;
+        }
+
+        if ($driver === 'webdav') {
+            if (trim((string) ($config['url'] ?? '')) === '') {
+                return 'Enter the WebDAV base URL, for example https://dav.example.com/backups.';
+            }
+
+            return null;
+        }
+
+        if (in_array($driver, ['box', 'mega', 'pcloud', 'yandex_disk', 'rclone'], true)) {
             $remote = trim((string) ($config['remote'] ?? ''));
 
             if ($remote === '') {
@@ -291,14 +340,11 @@ class MysqlBackupAdminController extends Controller
         }
 
         $allowedTypes = match ($driver) {
-            'google_drive' => ['drive'],
-            'onedrive' => ['onedrive'],
-            'dropbox' => ['dropbox'],
             'box' => ['box'],
             'mega' => ['mega'],
             'pcloud' => ['pcloud'],
             'yandex_disk' => ['yandex'],
-            'webdav' => ['webdav'],
+            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
             default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
         };
 

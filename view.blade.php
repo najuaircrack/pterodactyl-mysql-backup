@@ -13,6 +13,8 @@
     $serverClass = 'Pterodactyl\\Models\\Server';
 
     $driverLabels = $storageManager->storageDriverLabels();
+    $oauthRedirectUri = rtrim(request()->getSchemeAndHttpHost(), '/') . '/api/client/extensions/mysqlautobackup/mysql-backups/oauth/callback';
+    $oauthApps = $settings['oauth'] ?? [];
     $providers = $providerClass::query()->where('is_global', true)->where('enabled', true)->orderByDesc('is_default')->latest()->get();
     $recentBackups = $recordClass::query()->latest()->paginate(15, ['*'], 'backup_page');
     $recentAudits = $auditClass::query()->latest()->paginate(12, ['*'], 'audit_page');
@@ -154,7 +156,7 @@
             <div class="eyebrow">Blueprint Extension</div>
             <h2>MySQL Backup Manager</h2>
             <p class="hero-copy">
-                Queue-driven server database backups with per-server limits, encrypted storage credentials, user-owned cloud providers, restore safety, and audit visibility.
+                Queue-driven server database backups with per-server limits, encrypted storage credentials, one-click cloud storage, restore safety, and audit visibility.
                 Made by <a href="https://github.com/najuaircrack" target="_blank" rel="noopener noreferrer">@najuaircrack</a>.
             </p>
         </div>
@@ -327,7 +329,7 @@
         <div class="panel-box">
             <div class="panel-box-header">
                 <h3>{!! $icon('cloud-upload') !!} Build Storage Defaults</h3>
-                <span class="muted">Google Drive can be user-owned through encrypted per-server rclone config.</span>
+                <span class="muted">Toggle which storage drivers users may choose. One-click cloud apps are configured below.</span>
             </div>
             <div class="panel-box-body">
                 <div class="grid grid-2">
@@ -359,6 +361,82 @@
                             <label>{{ $driverLabels[$driver] }}</label>
                         </div>
                     @endforeach
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-box">
+            <div class="panel-box-header">
+                <h3>{!! $icon('key-round') !!} One-Click Cloud Apps</h3>
+                <span class="muted">Register one OAuth app per provider. Users then click "Connect" — no client ID or secret needed on their side.</span>
+            </div>
+            <div class="panel-box-body">
+                <div class="hint" style="margin-bottom: 14px;">
+                    Add this redirect URI to every OAuth app you register:
+                    <code style="display:block; margin-top:6px; padding:8px; word-break:break-all;">{{ $oauthRedirectUri }}</code>
+                </div>
+
+                <div class="grid grid-3">
+                    {{-- Google Drive --}}
+                    <div class="panel-box" style="margin:0;">
+                        <div class="panel-box-header"><h3>Google Drive</h3></div>
+                        <div class="panel-box-body">
+                            <div>
+                                <label>Client ID</label>
+                                <input type="text" name="oauth[google_drive][client_id]" value="{{ old('oauth.google_drive.client_id', $oauthApps['google_drive']['client_id'] ?? '') }}" placeholder="xxxxx.apps.googleusercontent.com">
+                            </div>
+                            <div>
+                                <label>Client Secret</label>
+                                <input type="password" name="oauth[google_drive][client_secret]" value="" placeholder="{{ empty($oauthApps['google_drive']['client_secret'] ?? '') ? 'Not set' : 'Stored securely' }}">
+                            </div>
+                            <p class="hint">
+                                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Google Cloud Console →</a><br>
+                                Create an OAuth 2.0 Client ID (Web app). Enable the Google Drive API. Add the redirect URI above.
+                            </p>
+                        </div>
+                    </div>
+
+                    {{-- Dropbox --}}
+                    <div class="panel-box" style="margin:0;">
+                        <div class="panel-box-header"><h3>Dropbox</h3></div>
+                        <div class="panel-box-body">
+                            <div>
+                                <label>App Key (Client ID)</label>
+                                <input type="text" name="oauth[dropbox][client_id]" value="{{ old('oauth.dropbox.client_id', $oauthApps['dropbox']['client_id'] ?? '') }}" placeholder="your-app-key">
+                            </div>
+                            <div>
+                                <label>App Secret</label>
+                                <input type="password" name="oauth[dropbox][client_secret]" value="" placeholder="{{ empty($oauthApps['dropbox']['client_secret'] ?? '') ? 'Not set' : 'Stored securely' }}">
+                            </div>
+                            <p class="hint">
+                                <a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer">Dropbox App Console →</a><br>
+                                Create a Scoped Access app. Grant: files.content.write, files.content.read, files.metadata.write. Add the redirect URI above.
+                            </p>
+                        </div>
+                    </div>
+
+                    {{-- OneDrive --}}
+                    <div class="panel-box" style="margin:0;">
+                        <div class="panel-box-header"><h3>OneDrive</h3></div>
+                        <div class="panel-box-body">
+                            <div>
+                                <label>Application (client) ID</label>
+                                <input type="text" name="oauth[onedrive][client_id]" value="{{ old('oauth.onedrive.client_id', $oauthApps['onedrive']['client_id'] ?? '') }}" placeholder="azure-app-client-id">
+                            </div>
+                            <div>
+                                <label>Client Secret</label>
+                                <input type="password" name="oauth[onedrive][client_secret]" value="" placeholder="{{ empty($oauthApps['onedrive']['client_secret'] ?? '') ? 'Not set' : 'Stored securely' }}">
+                            </div>
+                            <div>
+                                <label>Tenant</label>
+                                <input type="text" name="oauth[onedrive][tenant]" value="{{ old('oauth.onedrive.tenant', $oauthApps['onedrive']['tenant'] ?? 'common') }}" placeholder="common">
+                            </div>
+                            <p class="hint">
+                                <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer">Azure App Registrations →</a><br>
+                                Register an app. Add the redirect URI as a Web platform. Grant Microsoft Graph: Files.ReadWrite, offline_access. Use "common" tenant for all users, or your org tenant to restrict.
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -478,7 +556,8 @@
                         <label>Root, bucket, or remote</label>
                         <input type="text" name="config[root]" placeholder="/var/lib/pterodactyl/backups/databases">
                         <input type="text" name="config[bucket]" placeholder="bucket-name" style="margin-top: 8px;">
-                        <input type="text" name="config[remote]" placeholder="gdrive:pterodactyl/mysql" style="margin-top: 8px;">
+                        <input type="text" name="config[remote]" placeholder="box:pterodactyl/mysql" style="margin-top: 8px;">
+                        <input type="text" name="config[url]" placeholder="WebDAV URL (https://...)" style="margin-top: 8px;">
                     </div>
                     <div>
                         <label>Endpoint or host</label>
@@ -490,15 +569,15 @@
                         <label>Credentials</label>
                         <input type="text" name="config[key]" placeholder="S3 access key">
                         <input type="password" name="config[secret]" placeholder="S3 secret key" style="margin-top: 8px;">
-                        <input type="text" name="config[username]" placeholder="FTP/SFTP username" style="margin-top: 8px;">
-                        <input type="password" name="config[password]" placeholder="FTP/SFTP password" style="margin-top: 8px;">
+                        <input type="text" name="config[username]" placeholder="FTP/SFTP/WebDAV username" style="margin-top: 8px;">
+                        <input type="password" name="config[password]" placeholder="FTP/SFTP/WebDAV password" style="margin-top: 8px;">
                     </div>
                 </div>
 
                 <div style="margin-top: 14px;">
-                    <label>Optional rclone config</label>
-                    <textarea name="config[rclone_config]" placeholder="[gdrive]&#10;type = drive&#10;token = {...}"></textarea>
-                    <p class="hint">Stored encrypted. Use this for user-owned Google Drive style providers when the remote is not configured globally on the panel host.</p>
+                    <label>Optional rclone config (Box, MEGA, pCloud, Yandex, generic rclone only)</label>
+                    <textarea name="config[rclone_config]" placeholder="[myremote]&#10;type = box&#10;token = {...}"></textarea>
+                    <p class="hint">Stored encrypted. For Google Drive, Dropbox, and OneDrive, use the one-click "Connect" button from the server backup page instead.</p>
                 </div>
 
                 <div class="grid grid-3" style="margin-top: 14px;">

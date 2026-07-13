@@ -45,6 +45,10 @@ class MysqlBackupAdminSettingsService
     {
         $settings = $this->normalize(array_replace_recursive($this->get(), $settings));
 
+        // OAuth app credentials are global — strip them so server-specific
+        // rows never shadow the global OAuth configuration.
+        unset($settings['oauth']);
+
         MysqlBackupAdminSetting::query()->updateOrCreate(
             ['key' => 'server:' . $serverId],
             ['value' => $settings],
@@ -114,6 +118,13 @@ class MysqlBackupAdminSettingsService
                 'dump_password' => env('MYSQL_BACKUP_DUMP_PASSWORD', ''),
                 'dump_host' => env('MYSQL_BACKUP_DUMP_HOST', ''),
             ],
+            // Admin-owned OAuth apps. When these are filled in, users get a
+            // one-click "Connect" button and never touch a client id/secret.
+            'oauth' => [
+                'google_drive' => ['client_id' => '', 'client_secret' => ''],
+                'dropbox' => ['client_id' => '', 'client_secret' => ''],
+                'onedrive' => ['client_id' => '', 'client_secret' => '', 'tenant' => 'common'],
+            ],
         ];
     }
 
@@ -153,6 +164,53 @@ class MysqlBackupAdminSettingsService
             'max_concurrent_server_jobs' => (int) $settings['policy']['max_concurrent_server_jobs'],
             'allow_server_providers' => (bool) $settings['providers']['allow_server_providers'],
             'allowed_drivers' => $this->allowedDrivers($settings),
+            'oauth_providers' => $this->oauthOneClickProviders($settings),
+        ];
+    }
+
+    /**
+     * OAuth providers that are ready for one-click "Connect": the admin has
+     * filled in an app (client id + secret) AND the driver is allowed.
+     */
+    public function oauthOneClickProviders(?array $settings = null): array
+    {
+        $settings ??= $this->get();
+        $allowed = $this->allowedDrivers($settings);
+        $out = [];
+
+        foreach (['google_drive', 'dropbox', 'onedrive'] as $provider) {
+            if (in_array($provider, $allowed, true) && $this->oauthApp($provider, $settings) !== null) {
+                $out[] = $provider;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Return the admin-configured OAuth app credentials for a provider, or null
+     * when the admin has not set them up yet.
+     */
+    public function oauthApp(string $provider, ?array $settings = null): ?array
+    {
+        $settings ??= $this->get();
+        $entry = $settings['oauth'][$provider] ?? null;
+
+        if (!is_array($entry)) {
+            return null;
+        }
+
+        $clientId = trim((string) ($entry['client_id'] ?? ''));
+        $clientSecret = $this->revealSecret($entry['client_secret'] ?? '');
+
+        if ($clientId === '' || $clientSecret === '') {
+            return null;
+        }
+
+        return [
+            'client_id' => $clientId,
+            'client_secret' => $clientSecret,
+            'tenant' => trim((string) ($entry['tenant'] ?? 'common')) ?: 'common',
         ];
     }
 
@@ -187,7 +245,6 @@ class MysqlBackupAdminSettingsService
             'ftp' => $providers['allow_ftp'],
             'ftps' => $providers['allow_ftps'],
             'sftp' => $providers['allow_sftp'],
-            'rclone' => $providers['allow_rclone'],
         ])->filter()->keys()->values()->all();
     }
 
@@ -271,10 +328,26 @@ class MysqlBackupAdminSettingsService
         $runtime['dump_host'] = trim((string) ($runtime['dump_host'] ?? ''));
         $runtime['dump_password'] = $this->prepareSecret((string) ($runtime['dump_password'] ?? ''));
 
+        $oauth = $settings['oauth'] ?? [];
+        foreach (['google_drive', 'dropbox', 'onedrive'] as $provider) {
+            $entry = is_array($oauth[$provider] ?? null) ? $oauth[$provider] : [];
+            $normalized = [
+                'client_id' => trim((string) ($entry['client_id'] ?? '')),
+                'client_secret' => $this->prepareSecret((string) ($entry['client_secret'] ?? '')),
+            ];
+
+            if ($provider === 'onedrive') {
+                $normalized['tenant'] = trim((string) ($entry['tenant'] ?? 'common')) ?: 'common';
+            }
+
+            $oauth[$provider] = $normalized;
+        }
+
         return [
             'policy' => $policy,
             'providers' => $providers,
             'runtime' => $runtime,
+            'oauth' => $oauth,
         ];
     }
 

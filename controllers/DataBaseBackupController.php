@@ -197,124 +197,192 @@ class DataBaseBackupController extends ClientApiController
     }
 
     /**
-     * Step 1 — redirect user to Google's OAuth consent screen.
+     * Supported one-click OAuth providers and their service resolvers.
+     *
+     * @return array<string, callable>
+     */
+    private function oauthServices(): array
+    {
+        return [
+            'google_drive' => fn () => app(GoogleDriveOAuthService::class),
+            'dropbox'      => fn () => app(DropboxOAuthService::class),
+            'onedrive'     => fn () => app(OneDriveOAuthService::class),
+        ];
+    }
+
+    /**
+     * Step 1 — redirect user to the provider's OAuth consent screen.
      * The provider name and server UUID are encoded into the state param
      * so we can create the provider record after the callback.
+     *
+     * Generic version: works for google_drive, dropbox, onedrive.
      */
-    public function googleOAuthRedirect(Request $request, Server $server): JsonResponse
+    public function oauthPrepare(Request $request, Server $server, string $provider): JsonResponse
     {
         $this->authorizeServer($request, $server, 'ACTION_DATABASE_UPDATE', 'database.update');
 
-        $validator = Validator::make($request->all(), [
-            'name'      => ['required', 'string', 'max:120'],
-            'client_id' => ['required', 'string'],
-        ]);
-        $data = $validator->validate();
+        $services = $this->oauthServices();
+        if (!isset($services[$provider])) {
+            return response()->json(['error' => 'Unsupported OAuth provider.'], 422);
+        }
+
+        $adminSettings = app(MysqlBackupAdminSettingsService::class);
+        $app = $adminSettings->oauthApp($provider);
+        if (!$app) {
+            return response()->json(['error' => 'This provider has not been configured by an administrator. Ask an admin to add the app credentials in the admin settings.'], 422);
+        }
+
+        $data = Validator::make($request->all(), [
+            'name' => ['required', 'string', 'max:120'],
+        ])->validate();
 
         $state = base64_encode(json_encode([
-            'server'    => $server->uuid,
-            'name'      => $data['name'],
-            'client_id' => $data['client_id'],
-            'csrf'      => csrf_token(),
+            'provider' => $provider,
+            'server'   => $server->uuid,
+            'name'     => $data['name'],
+            'csrf'     => csrf_token(),
         ]));
 
-        $redirectUri = route('client.api.extension.mysql-backups.google-oauth-callback');
-        $url = app(GoogleDriveOAuthService::class)->buildAuthUrl($data['client_id'], $redirectUri, $state);
+        $redirectUri = route('client.api.extension.mysql-backups.oauth-callback');
+        $service = $services[$provider]();
+
+        $url = $provider === 'onedrive'
+            ? $service->buildAuthUrl($app['client_id'], $redirectUri, $state, $app['tenant'])
+            : $service->buildAuthUrl($app['client_id'], $redirectUri, $state);
 
         return response()->json(['redirect_url' => $url]);
     }
 
     /**
-     * Step 2 — Google redirects back here with ?code=...&state=...
+     * Step 2 — the provider redirects back here with ?code=...&state=...
      * Exchange the code for tokens and save the provider record.
+     *
+     * Generic version: dispatches by state.provider.
      */
-    public function googleOAuthCallback(Request $request): \Illuminate\Http\RedirectResponse
+    public function oauthCallback(Request $request): \Illuminate\Http\RedirectResponse
     {
         $code  = $request->query('code', '');
         $state = $request->query('state', '');
 
         if ($code === '' || $state === '') {
-            return redirect('/')->with('error', 'Google OAuth failed: missing code or state.');
+            return redirect('/')->with('error', 'OAuth failed: missing code or state.');
         }
 
         $stateData = json_decode(base64_decode($state), true);
 
         if (!$stateData || ($stateData['csrf'] ?? '') !== $request->session()->token()) {
-            return redirect('/')->with('error', 'Google OAuth failed: invalid state.');
+            return redirect('/')->with('error', 'OAuth failed: invalid state.');
+        }
+
+        $provider = (string) ($stateData['provider'] ?? 'google_drive');
+        $services = $this->oauthServices();
+        if (!isset($services[$provider])) {
+            return redirect('/')->with('error', 'OAuth failed: unknown provider.');
         }
 
         $server = \Pterodactyl\Models\Server::where('uuid', $stateData['server'])->firstOrFail();
 
-        $redirectUri  = route('client.api.extension.mysql-backups.google-oauth-callback');
-        $clientId     = $stateData['client_id'];
-
-        // The client secret must be supplied as a session value set before redirect.
-        // We store it temporarily in the session during the redirect step.
-        $clientSecret = $request->session()->pull('gdrive_client_secret_' . $stateData['server'], '');
-
-        if ($clientSecret === '') {
-            return redirect('/')->with('error', 'Google OAuth failed: client secret missing from session.');
+        $adminSettings = app(MysqlBackupAdminSettingsService::class);
+        $app = $adminSettings->oauthApp($provider);
+        if (!$app) {
+            return redirect('/')->with('error', 'OAuth failed: the admin app for this provider is no longer configured.');
         }
+
+        $redirectUri = route('client.api.extension.mysql-backups.oauth-callback');
+        $service = $services[$provider]();
 
         try {
-            $tokens = app(GoogleDriveOAuthService::class)->exchangeCode(
-                $clientId, $clientSecret, $code, $redirectUri
-            );
+            $tokens = $provider === 'onedrive'
+                ? $service->exchangeCode($app['client_id'], $app['client_secret'], $code, $redirectUri, $app['tenant'])
+                : $service->exchangeCode($app['client_id'], $app['client_secret'], $code, $redirectUri);
         } catch (\RuntimeException $e) {
-            return redirect('/')->with('error', 'Google OAuth failed: ' . $e->getMessage());
+            return redirect('/')->with('error', 'OAuth failed: ' . $e->getMessage());
         }
 
-        $provider = new MysqlBackupStorageProvider([
-            'server_id' => $server->id,
-            'name'      => $stateData['name'],
-            'driver'    => 'google_drive',
-            'is_global' => false,
-            'is_default'=> false,
-            'enabled'   => true,
-        ]);
-        $provider->setConfig([
-            'gdrive_client_id'     => $clientId,
-            'gdrive_client_secret' => $clientSecret,
-            'gdrive_refresh_token' => $tokens['refresh_token'],
-            'gdrive_access_token'  => $tokens['access_token'],
-            'gdrive_token_expiry'  => time() + (int) ($tokens['expires_in'] ?? 3600),
-        ]);
-        $provider->save();
+        $config = $this->oauthProviderConfig($provider, $app, $tokens);
 
-        // Redirect back to the server page — Blueprint extensions typically live here
+        $providerModel = new MysqlBackupStorageProvider([
+            'server_id'  => $server->id,
+            'name'       => $stateData['name'],
+            'driver'     => $provider,
+            'is_global'  => false,
+            'is_default' => false,
+            'enabled'    => true,
+        ]);
+        $providerModel->setConfig($config);
+        $providerModel->save();
+
+        $label = $this->oauthProviderLabel($provider);
+
         return redirect('/server/' . $server->uuid . '#mysql-backups')
-            ->with('success', 'Google Drive connected successfully.');
+            ->with('success', $label . ' connected successfully.');
     }
 
     /**
-     * Store the client secret in the session and return the redirect URL.
-     * Called by the frontend before opening the OAuth popup/redirect.
+     * Build the per-provider config array that stores only the user's tokens.
+     * The admin-owned client id/secret are never stored on the provider record.
      */
+    private function oauthProviderConfig(string $provider, array $app, array $tokens): array
+    {
+        return match ($provider) {
+            'google_drive' => [
+                'gdrive_refresh_token' => $tokens['refresh_token'],
+                'gdrive_access_token'  => $tokens['access_token'],
+                'gdrive_token_expiry'  => time() + (int) ($tokens['expires_in'] ?? 3600),
+            ],
+            'dropbox' => [
+                'dropbox_refresh_token' => $tokens['refresh_token'],
+                'dropbox_access_token'  => $tokens['access_token'],
+                'dropbox_token_expiry'  => time() + (int) ($tokens['expires_in'] ?? 14400),
+            ],
+            'onedrive' => [
+                'onedrive_refresh_token' => $tokens['refresh_token'],
+                'onedrive_access_token'  => $tokens['access_token'],
+                'onedrive_token_expiry'  => time() + (int) ($tokens['expires_in'] ?? 3600),
+            ],
+            default => [],
+        };
+    }
+
+    private function oauthProviderLabel(string $provider): string
+    {
+        return match ($provider) {
+            'google_drive' => 'Google Drive',
+            'dropbox'      => 'Dropbox',
+            'onedrive'     => 'OneDrive',
+            default        => ucfirst($provider),
+        };
+    }
+
+    // -------------------------------------------------------------------------
+    // Backward-compatible Google Drive aliases (keep old routes working)
+    // -------------------------------------------------------------------------
+
+    public function googleOAuthRedirect(Request $request, Server $server): JsonResponse
+    {
+        return $this->oauthPrepare($request, $server, 'google_drive');
+    }
+
     public function googleOAuthPrepare(Request $request, Server $server): JsonResponse
     {
-        $this->authorizeServer($request, $server, 'ACTION_DATABASE_UPDATE', 'database.update');
+        return $this->oauthPrepare($request, $server, 'google_drive');
+    }
 
-        $validator = Validator::make($request->all(), [
-            'name'          => ['required', 'string', 'max:120'],
-            'client_id'     => ['required', 'string'],
-            'client_secret' => ['required', 'string'],
-        ]);
-        $data = $validator->validate();
+    public function googleOAuthCallback(Request $request): \Illuminate\Http\RedirectResponse
+    {
+        // The legacy Google callback may receive state without a "provider"
+        // key — inject it so the generic callback can dispatch.
+        $state = $request->query('state', '');
 
-        // Temporarily store the client secret in the server-side session
-        $request->session()->put('gdrive_client_secret_' . $server->uuid, $data['client_secret']);
+        if ($state !== '') {
+            $decoded = json_decode(base64_decode($state), true);
+            if (is_array($decoded) && !isset($decoded['provider'])) {
+                $decoded['provider'] = 'google_drive';
+                $request->merge(['state' => base64_encode(json_encode($decoded))]);
+            }
+        }
 
-        $state = base64_encode(json_encode([
-            'server'    => $server->uuid,
-            'name'      => $data['name'],
-            'client_id' => $data['client_id'],
-            'csrf'      => csrf_token(),
-        ]));
-
-        $redirectUri = route('client.api.extension.mysql-backups.google-oauth-callback');
-        $url = app(GoogleDriveOAuthService::class)->buildAuthUrl($data['client_id'], $redirectUri, $state);
-
-        return response()->json(['redirect_url' => $url]);
+        return $this->oauthCallback($request);
     }
 
     public function deleteProvider(Request $request, Server $server, int $provider): JsonResponse
@@ -477,6 +545,42 @@ class DataBaseBackupController extends ClientApiController
         ]));
     }
 
+    public function destroy(
+        Request $request,
+        Server $server,
+        string $backup,
+        MysqlBackupStorageManager $storage,
+    ): JsonResponse {
+        $this->authorizeServer($request, $server, 'ACTION_DATABASE_UPDATE', 'database.update');
+
+        $record = MysqlBackupRecord::query()
+            ->where('server_id', $server->id)
+            ->where('uuid', $backup)
+            ->firstOrFail();
+
+        if ($record->status === MysqlBackupStatus::RUNNING || $record->status === MysqlBackupStatus::RESTORING) {
+            return response()->json(['error' => 'Cannot delete a backup that is currently running or restoring.'], 422);
+        }
+
+        if ($record->storageProvider && in_array($record->status, [MysqlBackupStatus::SUCCESS, MysqlBackupStatus::RESTORED], true)) {
+            try {
+                $storage->delete($record->storageProvider, $record->path);
+            } catch (\Throwable $e) {
+                // Log but still remove the record — the file may already be gone
+            }
+        }
+
+        $record->delete();
+
+        app(MysqlBackupAuditService::class)->record('backup_deleted', [
+            'server_id' => $server->id,
+            'backup_uuid' => $record->uuid,
+            'database_name' => $record->database_name,
+        ], $request, $record);
+
+        return response()->json(['deleted' => true]);
+    }
+
     private function storageProviders(Server $server)
     {
         return MysqlBackupStorageProvider::query()
@@ -550,8 +654,11 @@ class DataBaseBackupController extends ClientApiController
             's3', 'aws_s3', 'cloudflare_r2', 'minio', 'wasabi', 'backblaze_b2', 'digitalocean_spaces', 'linode_object_storage', 'vultr_object_storage', 'scaleway_object_storage', 'oracle_object_storage', 'google_cloud_storage' => ['key', 'secret', 'region', 'bucket', 'endpoint', 'path_style'],
             'ftp', 'ftps' => ['host', 'username', 'password', 'port', 'root', 'ssl', 'passive', 'timeout'],
             'sftp' => ['host', 'username', 'password', 'private_key', 'passphrase', 'port', 'root', 'timeout'],
-            'google_drive' => ['gdrive_client_id', 'gdrive_client_secret', 'gdrive_refresh_token'],
-            'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex_disk', 'webdav', 'rclone' => ['remote', 'rclone_config'],
+            'google_drive' => ['gdrive_client_id', 'gdrive_client_secret', 'gdrive_refresh_token', 'gdrive_access_token', 'gdrive_token_expiry'],
+            'dropbox' => ['dropbox_refresh_token', 'dropbox_access_token', 'dropbox_token_expiry'],
+            'onedrive' => ['onedrive_refresh_token', 'onedrive_access_token', 'onedrive_token_expiry'],
+            'webdav' => ['url', 'username', 'password'],
+            'box', 'mega', 'pcloud', 'yandex_disk', 'rclone' => ['remote', 'rclone_config'],
             default => ['root'],
         };
 
@@ -560,14 +667,30 @@ class DataBaseBackupController extends ClientApiController
 
     private function providerConfigError(string $driver, array $config): ?string
     {
-        if ($driver === 'google_drive') {
-            if (empty($config['gdrive_refresh_token'])) {
-                return 'Google Drive must be connected via OAuth. Use the "Connect Google Drive" button.';
+        if (in_array($driver, ['google_drive', 'dropbox', 'onedrive'], true)) {
+            $tokenKey = match ($driver) {
+                'google_drive' => 'gdrive_refresh_token',
+                'dropbox'      => 'dropbox_refresh_token',
+                'onedrive'     => 'onedrive_refresh_token',
+            };
+
+            if (empty($config[$tokenKey])) {
+                $label = $this->oauthProviderLabel($driver);
+                return $label . ' must be connected via OAuth. Use the "Connect ' . $label . '" button.';
             }
+
             return null;
         }
 
-        if (in_array($driver, ['onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex_disk', 'webdav', 'rclone'], true)) {
+        if ($driver === 'webdav') {
+            if (trim((string) ($config['url'] ?? '')) === '') {
+                return 'Enter the WebDAV base URL, for example https://dav.example.com/backups.';
+            }
+
+            return null;
+        }
+
+        if (in_array($driver, ['box', 'mega', 'pcloud', 'yandex_disk', 'rclone'], true)) {
             $remote = trim((string) ($config['remote'] ?? ''));
 
             if ($remote === '') {
@@ -620,14 +743,11 @@ class DataBaseBackupController extends ClientApiController
         }
 
         $allowedTypes = match ($driver) {
-            'google_drive' => ['drive'],
-            'onedrive' => ['onedrive'],
-            'dropbox' => ['dropbox'],
             'box' => ['box'],
             'mega' => ['mega'],
             'pcloud' => ['pcloud'],
             'yandex_disk' => ['yandex'],
-            'webdav' => ['webdav'],
+            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
             default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
         };
 

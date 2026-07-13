@@ -14,7 +14,7 @@ Made by [@najuaircrack](https://github.com/najuaircrack).
 - Imports and lists legacy local backups from existing backup folders.
 - Lets users download, restore, filter, search, and monitor backup progress from the server panel.
 - Gives admins global defaults, server-specific limits, provider health checks, audit logs, and backup history.
-- Supports local, S3-compatible, FTP, FTPS, SFTP, Google Drive (OAuth), OneDrive, Dropbox, Box, MEGA, pCloud, Yandex Disk, WebDAV, and generic rclone storage.
+- Supports local, S3-compatible, FTP, FTPS, SFTP, Google Drive, Dropbox, OneDrive (one-click OAuth), WebDAV (native), and Box, MEGA, pCloud, Yandex Disk, generic rclone (advanced).
 
 ## Architecture
 
@@ -23,9 +23,9 @@ The extension is fully panel integrated:
 - `MysqlBackupSchedulerService` reconciles due schedules from the database.
 - `MysqlBackupQueueService` creates backup records and dispatches database jobs.
 - `ProcessMysqlDatabaseBackupJob` runs `mysqldump`, compresses, encrypts when enabled, uploads, verifies, notifies, and enforces retention.
-- `MysqlBackupStorageManager` abstracts local, S3-style, FTP/SFTP, rclone, and Google Drive (native OAuth) storage.
-- `GoogleDriveOAuthService` handles Google Drive OAuth token exchange, refresh, and direct Drive REST API uploads — no rclone required for Google Drive.
-- `MysqlBackupAdminSettingsService` manages global and per-server admin defaults.
+- `MysqlBackupStorageManager` abstracts local, S3-style, FTP/SFTP, native WebDAV, rclone, and one-click OAuth (Google Drive, Dropbox, OneDrive) storage.
+- `GoogleDriveOAuthService`, `DropboxOAuthService`, `OneDriveOAuthService` handle OAuth token exchange, refresh, and direct API uploads — no rclone required for these providers.
+- `MysqlBackupAdminSettingsService` manages global and per-server admin defaults, including admin-owned OAuth app credentials.
 - React server UI handles policy, provider setup, manual backup, restore, download, progress, and history.
 - Blade admin UI handles operational controls, provider testing, server limit overrides, and audits.
 
@@ -34,7 +34,7 @@ The extension is fully panel integrated:
 - Pterodactyl panel with Blueprint, target `beta-2026-01`.
 - Working Laravel queue worker, normally `pteroq`.
 - `mysqldump` and `mysql` available on the panel host.
-- Optional: `rclone` for OneDrive, Dropbox, Box, MEGA, pCloud, WebDAV, and similar providers. **Not required for Google Drive.**
+- Optional: `rclone` for Box, MEGA, pCloud, Yandex Disk, and generic rclone remotes. **Not required for Google Drive, Dropbox, OneDrive, or WebDAV.**
 - Optional: Flysystem FTP/SFTP adapters, installed by `private/install.sh`.
 
 ## Installation
@@ -57,96 +57,77 @@ composer require league/flysystem-ftp league/flysystem-sftp-v3
 
 ---
 
-## Setting Up Google Drive OAuth (No rclone Needed)
+## Setting Up One-Click Cloud Storage (Google Drive, Dropbox, OneDrive)
 
-Users connect their own Google Drive directly through OAuth. Backups upload straight to their Drive via the Google Drive REST API. No rclone installation or config files required.
+The admin registers **one OAuth app per provider** in the admin settings. Users then click a single "Connect" button — they never see a client ID or secret. Backups upload to each user's own cloud account.
 
-### Step 1 — Create a Google Cloud Project
+### How It Works
 
-1. Go to [https://console.cloud.google.com](https://console.cloud.google.com) and sign in.
-2. Click the project dropdown at the top → **New Project** → give it a name → **Create**.
-3. Make sure your new project is selected in the dropdown.
+1. **Admin** creates an OAuth app at the provider's developer console (Google Cloud, Dropbox, Azure).
+2. **Admin** enters the app's client ID and secret in **Admin → MySQL Auto Backup → One-Click Cloud Apps**.
+3. **Users** open their server's MySQL Backups tab, click **Add Provider**, select the provider, and click **Connect {Provider}**.
+4. A consent popup opens; the user authorises the app and the popup closes automatically.
+5. Backups upload to the user's own cloud storage — no server-side rclone or per-user OAuth apps.
 
-### Step 2 — Enable the Google Drive API
+### Redirect URI
 
-1. In the left sidebar go to **APIs & Services → Library**.
-2. Search for **Google Drive API** and click it.
-3. Click **Enable**.
-
-### Step 3 — Configure the OAuth Consent Screen
-
-1. Go to **APIs & Services → OAuth consent screen**.
-2. Choose **External** → **Create**.
-3. Fill in:
-   - **App name** — anything, e.g. `Pterodactyl Backup`
-   - **User support email** — your email
-   - **Developer contact email** — your email
-4. Click **Save and Continue** through the Scopes and Test Users steps (no changes needed).
-5. Click **Back to Dashboard**.
-
-> If your app stays in **Testing** mode, only Google accounts you add as test users can connect. To allow any Google account, click **Publish App** → **Confirm**.
-
-### Step 4 — Create OAuth 2.0 Credentials
-
-1. Go to **APIs & Services → Credentials**.
-2. Click **+ Create Credentials → OAuth 2.0 Client ID**.
-3. Set **Application type** to **Web application**.
-4. Give it a name, e.g. `Pterodactyl Backup Client`.
-5. Under **Authorized redirect URIs**, click **+ Add URI** and enter:
+Every OAuth app must whitelist this exact redirect URI (shown in the admin panel):
 
 ```
-https://game.example.in/api/client/extensions/mysqlautobackup/google-oauth/callback
+https://your-panel-domain/api/client/extensions/mysqlautobackup/mysql-backups/oauth/callback
 ```
 
-> Replace `game.example.in` with your actual panel domain. Do **not** add a trailing slash.
+> Replace `your-panel-domain` with your actual panel domain. No trailing slash. Use `https`, not `http`.
 
-6. Click **Create**.
-7. Copy the **Client ID** and **Client Secret** shown — you will need both in the next step.
+### Google Drive Setup
 
-### Step 5 — Connect Google Drive in the Panel
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → create or select a project.
+2. Enable the **Google Drive API** (APIs & Services → Library).
+3. Configure the **OAuth consent screen** (External). Add your email as a test user, or click **Publish App** to allow any Google account.
+4. Go to **Credentials → + Create Credentials → OAuth 2.0 Client ID** (Web application).
+5. Add the redirect URI above under **Authorized redirect URIs**.
+6. Copy the **Client ID** and **Client Secret** into the admin panel's Google Drive section.
 
-1. Open your server in the Pterodactyl panel and go to the **MySQL Backups** tab.
-2. Scroll to **Storage Providers** and click **Add Provider**.
-3. Select **Google Drive** from the driver dropdown.
-4. Enter a **Name** for this provider, e.g. `My Google Drive`.
-5. Paste your **Client ID** and **Client Secret** from Step 4.
-6. Click **Connect Google Drive**.
-7. A Google consent popup will open — sign in with the Google account you want backups saved to and click **Allow**.
-8. The popup closes automatically and the provider appears in your list.
+> Google shows an "unverified app" warning until you verify the app or publish it. Unverified apps are capped at 100 users.
 
-### Step 6 — Select the Provider for Backups
+### Dropbox Setup
 
-1. Still on the MySQL Backups tab, go to **Configuration**.
-2. Set **Storage Provider** to the Google Drive provider you just added.
-3. Save the configuration.
+1. Go to [Dropbox App Console](https://www.dropbox.com/developers/apps) → **Create app**.
+2. Choose **Scoped access** → **Full Dropbox** (or app folder if you prefer).
+3. Under **Permissions**, grant: `files.content.write`, `files.content.read`, `files.metadata.write`.
+4. Under **Settings**, add the redirect URI above to **Redirect URIs**.
+5. Copy the **App key** (client ID) and **App secret** into the admin panel's Dropbox section.
 
-Backups will now upload directly to a folder called `pterodactyl-mysql-backups` in that Google account's Drive, organized as `servers/{server-uuid}/{year}/{month}/{day}/{database}_{time}.sql.gz`.
+### OneDrive Setup
+
+1. Go to [Azure Portal → App Registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) → **New registration**.
+2. Under **Authentication**, add the redirect URI above as a **Web** platform redirect URI.
+3. Under **API Permissions**, add **Microsoft Graph → Delegated**: `Files.ReadWrite`, `offline_access`.
+4. Under **Certificates & secrets**, create a **New client secret** and copy the value.
+5. Copy the **Application (client) ID** and the **Client Secret** into the admin panel's OneDrive section.
+6. Set **Tenant** to `common` (allows any Microsoft account) or your org's tenant ID to restrict to your org.
+
+### Connecting as a User
+
+1. Open a server in the panel → **MySQL Backups** tab.
+2. Click **Add Provider**, select the provider (Google Drive / Dropbox / OneDrive).
+3. Enter a name (e.g. `My Drive`) and click **Connect {Provider}**.
+4. Authorise in the popup — it closes automatically.
+5. Set the provider as the storage target in the backup configuration.
 
 ### Retention
 
-Retention works automatically. When a backup is pruned by the retention count or retention days policy, the extension calls the Google Drive API to delete the file from Drive as well. No manual cleanup needed.
+Retention works automatically. When a backup is pruned by the retention policy, the extension calls the provider's API to delete the file. No manual cleanup needed.
 
-### Troubleshooting Google Drive
+### Troubleshooting One-Click Cloud
 
-**"redirect_uri_mismatch" error from Google**
+**"redirect_uri_mismatch"** — The redirect URI in the provider's console doesn't match exactly. Copy it from the admin panel's One-Click Cloud Apps section.
 
-The redirect URI in your Google Cloud credentials does not match exactly. Check that you entered:
-```
-https://game.example.in/api/client/extensions/mysqlautobackup/mysql-backups/google-oauth/callback
-```
-with no trailing slash and using `https`, not `http`.
+**"did not return a refresh token"** — Revoke the app's access in your account settings, then connect again. Google: [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Dropbox: [dropbox.com/account/connected_apps](https://www.dropbox.com/account/connected_apps).
 
-**"Google did not return a refresh token"**
+**"admin has not configured this provider"** — The admin hasn't entered the OAuth app credentials yet, or the provider is not in the allowed drivers list.
 
-This happens if the consent screen was already approved once without `prompt=consent`. Go to [https://myaccount.google.com/permissions](https://myaccount.google.com/permissions), remove the app's access, then try connecting again.
-
-**Upload fails after a long backup**
-
-The access token may have expired mid-upload on very large databases. The extension retries once with a fresh token automatically. If it still fails, check your panel PHP timeout settings.
-
-**Popup is blocked**
-
-Allow popups for your panel domain in your browser, then click Connect again.
+**Popup is blocked** — Allow popups for your panel domain, then click Connect again.
 
 ---
 
@@ -168,11 +149,11 @@ MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=false
 
 Most runtime limits are configured in the admin panel. Environment values are used for binary paths, optional defaults, and security overrides.
 
-## User-Owned Storage via rclone (non-Google Drive)
+## Advanced Storage via rclone (Box, MEGA, pCloud, Yandex Disk)
 
-For OneDrive, Dropbox, Box, MEGA, pCloud, Yandex Disk, and WebDAV, users supply an rclone config block:
+For providers that don't have a native one-click integration, users supply an rclone config block:
 
-1. Admin enables `Allow users to add server storage providers` and the desired provider.
+1. Admin enables `Allow users to add server storage providers` and the desired provider (Box, MEGA, pCloud, Yandex Disk, or generic rclone).
 2. User creates a remote with rclone on a trusted machine:
 
 ```bash
@@ -181,6 +162,8 @@ rclone config show myremote
 ```
 
 3. User adds the provider in the panel, sets a remote path like `myremote:pterodactyl/mysql-backups`, and pastes the rclone config block.
+
+> Google Drive, Dropbox, OneDrive, and WebDAV do **not** need rclone — they have native integrations. This section is only for Box, MEGA, pCloud, Yandex Disk, and generic rclone remotes.
 
 The config is stored encrypted in the database and written to a temporary `0600` file only while a job runs.
 
@@ -198,7 +181,7 @@ FLUSH PRIVILEGES;
 
 - Database passwords and storage provider credentials are never sent to the frontend.
 - Storage provider configs including OAuth tokens are encrypted with Laravel `Crypt`.
-- Google Drive OAuth tokens are auto-refreshed server-side; the client secret never leaves the server after initial setup.
+- Google Drive / Dropbox / OneDrive OAuth tokens are auto-refreshed server-side. The admin-owned client secret is encrypted and never sent to the frontend.
 - Optional backup encryption uses AES-256-GCM.
 - Webhook URLs are blocked if they resolve to private or reserved IP ranges unless `MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=true`.
 - Rclone remotes must use named remotes like `gdrive:path`; inline remotes and parent traversal are rejected.
@@ -239,6 +222,6 @@ chown -R www-data:www-data /var/lib/pterodactyl/backups/databases
 chmod -R 750 /var/lib/pterodactyl/backups/databases
 ```
 
-**rclone upload fails (non-Google Drive providers)**
+**rclone upload fails (Box, MEGA, pCloud, Yandex Disk, generic rclone)**
 
-Confirm `rclone` is installed, the remote name in the path matches the pasted config block, and the config block includes the correct `type` section.
+Confirm `rclone` is installed, the remote name in the path matches the pasted config block, and the config block includes the correct `type` section. Google Drive, Dropbox, OneDrive, and WebDAV do not use rclone.

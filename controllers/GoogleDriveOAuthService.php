@@ -7,9 +7,14 @@ use RuntimeException;
 /**
  * Handles all Google Drive OAuth and REST API operations.
  *
+ * The OAuth *app* (client id + secret) is owned by the panel administrator
+ * and read from the admin settings. Legacy providers that still carry their
+ * own gdrive_client_id / gdrive_client_secret in the provider config are
+ * honoured as a backward-compatibility fallback.
+ *
  * Config keys stored on the provider:
- *   gdrive_client_id       – OAuth client ID from Google Cloud Console
- *   gdrive_client_secret   – OAuth client secret
+ *   gdrive_client_id       – OAuth client ID (legacy; now pulled from admin settings)
+ *   gdrive_client_secret   – OAuth client secret (legacy; now pulled from admin settings)
  *   gdrive_refresh_token   – long-lived refresh token (stored after callback)
  *   gdrive_access_token    – short-lived access token (cached, auto-refreshed)
  *   gdrive_token_expiry    – unix timestamp when access token expires
@@ -23,6 +28,33 @@ class GoogleDriveOAuthService
     private const FILES_URL   = 'https://www.googleapis.com/drive/v3/files';
     private const SCOPES      = 'https://www.googleapis.com/auth/drive.file';
     private const FOLDER_NAME = 'pterodactyl-mysql-backups';
+
+    public function providerKey(): string
+    {
+        return 'google_drive';
+    }
+
+    /**
+     * Resolve the OAuth client id/secret for a provider.
+     * Prefer the admin-owned app; fall back to the legacy per-provider
+     * config so existing providers keep working after the refactor.
+     *
+     * @return array{0:string,1:string}
+     */
+    private function appCredentials(MysqlBackupStorageProvider $provider): array
+    {
+        $config = $provider->getConfig();
+        $adminApp = app(MysqlBackupAdminSettingsService::class)->oauthApp($this->providerKey());
+
+        if ($adminApp !== null) {
+            return [$adminApp['client_id'], $adminApp['client_secret']];
+        }
+
+        return [
+            (string) ($config['gdrive_client_id'] ?? ''),
+            (string) ($config['gdrive_client_secret'] ?? ''),
+        ];
+    }
 
     // -------------------------------------------------------------------------
     // OAuth flow
@@ -92,10 +124,11 @@ class GoogleDriveOAuthService
     public function refreshAccessToken(MysqlBackupStorageProvider $provider): string
     {
         $config = $provider->getConfig();
+        [$clientId, $clientSecret] = $this->appCredentials($provider);
 
         $response = $this->post(self::TOKEN_URL, [
-            'client_id'     => $config['gdrive_client_id']     ?? '',
-            'client_secret' => $config['gdrive_client_secret'] ?? '',
+            'client_id'     => $clientId,
+            'client_secret' => $clientSecret,
             'refresh_token' => $config['gdrive_refresh_token'] ?? '',
             'grant_type'    => 'refresh_token',
         ]);
@@ -316,7 +349,6 @@ class GoogleDriveOAuthService
             CURLOPT_HTTPHEADER     => ['Authorization: Bearer ' . $token],
             CURLOPT_TIMEOUT        => 60,
         ]);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_exec($ch);
         curl_close($ch);
 

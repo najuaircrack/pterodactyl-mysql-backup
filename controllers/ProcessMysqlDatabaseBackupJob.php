@@ -82,6 +82,11 @@ class ProcessMysqlDatabaseBackupJob implements ShouldQueue
                 'progress' => 92,
             ])->save();
 
+            // Enforce quota: reject the backup before uploading if its size
+            // alone exceeds the server or user quota. This prevents a single
+            // huge dump from blowing past the limit and wasting upload bandwidth.
+            $this->assertBackupWithinQuota($record, $limits);
+
             $provider = $record->storageProvider;
             $stored = false;
             $lastStorageException = null;
@@ -147,6 +152,7 @@ class ProcessMysqlDatabaseBackupJob implements ShouldQueue
 
             $notifications->send($configuration, $record, 'success', $localPath);
             $retention->enforce($configuration, $storage);
+            $retention->enforceQuota($record->server_id, $record->requested_by, $storage);
         } catch (Throwable $exception) {
             $record->forceFill([
                 'status' => MysqlBackupStatus::FAILED,
@@ -188,5 +194,49 @@ class ProcessMysqlDatabaseBackupJob implements ShouldQueue
                 'completed_at' => now(),
                 'error_message' => mb_substr($exception->getMessage(), 0, 64000),
             ]);
+    }
+
+    /**
+     * Reject a backup whose own size exceeds the server or user quota.
+     * Called after the dump is created but before it is uploaded, so we
+     * avoid wasting storage bandwidth on a backup that can never fit.
+     */
+    private function assertBackupWithinQuota(MysqlBackupRecord $record, array $limits): void
+    {
+        $backupBytes = (int) $record->size_bytes;
+        if ($backupBytes <= 0) {
+            return;
+        }
+
+        $serverQuotaBytes = ((int) $limits['server_quota_mb']) * 1024 * 1024;
+        if ($serverQuotaBytes > 0 && $backupBytes > $serverQuotaBytes) {
+            throw new \RuntimeException(
+                'This backup is ' . $this->formatBytes($backupBytes) .
+                ' which exceeds the server quota of ' . $this->formatBytes($serverQuotaBytes) .
+                '. The backup was cancelled before upload.'
+            );
+        }
+
+        if ($limits['user_quota_mb']) {
+            $userQuotaBytes = ((int) $limits['user_quota_mb']) * 1024 * 1024;
+            if ($userQuotaBytes > 0 && $backupBytes > $userQuotaBytes) {
+                throw new \RuntimeException(
+                    'This backup is ' . $this->formatBytes($backupBytes) .
+                    ' which exceeds your user quota of ' . $this->formatBytes($userQuotaBytes) .
+                    '. The backup was cancelled before upload.'
+                );
+            }
+        }
+    }
+
+    private function formatBytes(int $bytes): string
+    {
+        if ($bytes >= 1024 * 1024 * 1024) {
+            return round($bytes / 1024 / 1024 / 1024, 2) . ' GB';
+        }
+        if ($bytes >= 1024 * 1024) {
+            return round($bytes / 1024 / 1024, 1) . ' MB';
+        }
+        return round($bytes / 1024, 1) . ' KB';
     }
 }

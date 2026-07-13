@@ -1,8 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-# Optional Flysystem adapters used by remote storage providers. The extension does not
-# install or register any cron scripts; all backup work is dispatched through Laravel queues.
+# Optional Flysystem adapters for FTP/FTPS/SFTP storage providers.
 composer require league/flysystem-ftp league/flysystem-sftp-v3
 
-echo "For Google Drive, OneDrive, Dropbox, Box, Mega, pCloud and other rclone-backed providers, install rclone on the panel host. Users may paste their own encrypted rclone config from the server storage UI."
+echo "==> MySQL Auto Backup extension installed."
+echo ""
+echo "One-click cloud storage (Google Drive, Dropbox, OneDrive):"
+echo "  1. Go to Admin → MySQL Auto Backup → One-Click Cloud Apps"
+echo "  2. Enter the OAuth app credentials for each provider you want"
+echo "  3. Users will see a 'Connect' button — no client ID or secret on their side"
+echo ""
+echo "WebDAV: native (no extra software). Users enter URL + username + password."
+echo ""
+echo "Advanced (Box, MEGA, pCloud, Yandex Disk, generic rclone):"
+echo "  Install the rclone binary on the panel host if you need these providers."
+echo "  MYSQL_BACKUP_RCLONE_PATH=rclone (or set the full path)"
