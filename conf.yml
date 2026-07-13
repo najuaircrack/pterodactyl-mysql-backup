@@ -3,7 +3,7 @@ info:
   identifier: "mysqlautobackup"
   description: "Queue-driven, panel-integrated MySQL backup management for Pterodactyl servers"
   flags: ""
-  version: "2.1.0"
+  version: "2.2.0"
   target: "beta-2026-01"
   author: "najuaircrack"
   icon: "assets/icon.jpg"

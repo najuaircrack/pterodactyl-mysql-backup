@@ -53,7 +53,7 @@ The extension is fully panel integrated:
 
 ## Requirements
 
-- Pterodactyl panel with Blueprint, target `beta-2026-01`.
+- Pterodactyl panel with [Blueprint](https://github.com/TeamBluePrint/Blueprint) installed, target `beta-2026-01`.
 - Working Laravel queue worker, normally `pteroq`.
 - `mysqldump` and `mysql` available on the panel host.
 - Optional: `rclone` for Box, MEGA, pCloud, Yandex Disk, and generic rclone remotes. **Not required for Google Drive, Dropbox, OneDrive, or WebDAV.**
@@ -61,9 +61,44 @@ The extension is fully panel integrated:
 
 ## Installation
 
-Place the extension in your Blueprint extensions directory as `mysqlautobackup`, then run:
+### For End Users
+
+Download the latest `mysqlautobackup.blueprint` from the [GitHub releases page](https://github.com/najuaircrack/pterodactyl-mysql-backup/releases), then install it on your panel:
 
 ```bash
+cd /var/www/pterodactyl
+
+# Download the latest release (or upload the .blueprint file manually)
+wget https://github.com/najuaircrack/pterodactyl-mysql-backup/releases/latest/download/mysqlautobackup.blueprint
+
+# Install the extension
+blueprint -i mysqlautobackup
+
+# Restart the queue worker
+systemctl restart pteroq
+```
+
+If you use FTP, FTPS, or SFTP storage, install the Flysystem adapters after the extension is installed:
+
+```bash
+cd /var/www/pterodactyl
+composer require league/flysystem-ftp league/flysystem-sftp-v3
+systemctl restart pteroq
+```
+
+### For Development
+
+Clone the repo into your Blueprint development directory and build from source:
+
+```bash
+cd /var/www/pterodactyl/blueprint/dev
+git clone https://github.com/najuaircrack/pterodactyl-mysql-backup.git mysqlautobackup
+
+# If Blueprint developer mode is not enabled, enable it:
+export is_developer=0
+
+# Build the extension
+cd /var/www/pterodactyl
 blueprint -build
 php artisan migrate --force
 php artisan optimize:clear
@@ -71,11 +106,7 @@ php artisan queue:restart
 systemctl restart pteroq
 ```
 
-If you use FTP, FTPS, or SFTP storage, install the adapters:
-
-```bash
-composer require league/flysystem-ftp league/flysystem-sftp-v3
-```
+After making changes, re-run `blueprint -build` and `php artisan optimize:clear` to apply them.
 
 ---
 

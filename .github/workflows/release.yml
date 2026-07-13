@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mysqlautobackup.blueprint'
+      - 'conf.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from conf.yml
+        id: version
+        run: |
+          VERSION=$(grep '^  version:' conf.yml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Extracted version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag v${{ steps.version.outputs.version }} already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag v${{ steps.version.outputs.version }} does not exist — will create"
+          fi
+
+      - name: Generate release notes
+        id: notes
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          # Get the most recent tag (any tag, not just v-prefixed)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            # No previous tag — grab all commits on main
+            NOTES=$(git log --pretty=format:"- %s (%h)" HEAD)
+          else
+            NOTES=$(git log --pretty=format:"- %s (%h)" "${LAST_TAG}..HEAD")
+          fi
+
+          # Write to file to preserve newlines
+          printf "%s\n" "$NOTES" > release_notes.md
+          echo "Generated release notes:"
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          files: |
+            mysqlautobackup.blueprint
+          draft: false
+          prerelease: false
