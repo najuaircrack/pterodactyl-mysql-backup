@@ -280,8 +280,23 @@ class MysqlBackupAdminController extends Controller
         }
 
         if ($driver === 'webdav') {
-            if (trim((string) ($config['url'] ?? '')) === '') {
+            $url = trim((string) ($config['url'] ?? ''));
+
+            if ($url === '') {
                 return 'Enter the WebDAV base URL, for example https://dav.example.com/backups.';
+            }
+
+            if (!filter_var($url, FILTER_VALIDATE_URL)) {
+                return 'The WebDAV URL is not a valid URL.';
+            }
+
+            $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+            if (!in_array($scheme, ['http', 'https'], true)) {
+                return 'The WebDAV URL must use http or https.';
+            }
+
+            if (!app(MysqlBackupSsrfGuard::class)->isAllowed($url)) {
+                return 'The WebDAV URL must resolve to a public address. Set MYSQL_BACKUP_ALLOW_PRIVATE_URLS=true only if you intentionally need an internal WebDAV server.';
             }
 
             return null;
@@ -344,11 +359,19 @@ class MysqlBackupAdminController extends Controller
             'mega' => ['mega'],
             'pcloud' => ['pcloud'],
             'yandex_disk' => ['yandex'],
-            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
-            default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
+            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav', 's3'],
+            default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav', 's3'],
         };
 
-        return in_array(strtolower($typeMatch[1]), $allowedTypes, true)
+        $type = strtolower($typeMatch[1]);
+
+        // 'local' type allows reading/writing arbitrary files on the panel host.
+        // Never allow it regardless of the driver or default case.
+        if ($type === 'local') {
+            return 'The rclone "local" type is blocked for security. It would allow file access on the panel host.';
+        }
+
+        return in_array($type, $allowedTypes, true)
             ? null
             : 'The rclone config type does not match the selected storage driver.';
     }

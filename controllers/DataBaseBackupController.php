@@ -114,9 +114,9 @@ class DataBaseBackupController extends ClientApiController
         $data = $validator->validate();
 
         $webhookUrl = $data['notifications']['webhook_url'] ?? null;
-        if ($webhookUrl && !$this->webhookUrlIsAllowed($webhookUrl)) {
+        if ($webhookUrl && !app(MysqlBackupSsrfGuard::class)->isAllowed($webhookUrl)) {
             return response()->json([
-                'error' => 'Webhook URL must resolve to a public address. Set MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=true only if you intentionally need internal webhooks.',
+                'error' => 'Webhook URL must resolve to a public address. Set MYSQL_BACKUP_ALLOW_PRIVATE_URLS=true only if you intentionally need internal webhooks.',
             ], 422);
         }
 
@@ -683,8 +683,23 @@ class DataBaseBackupController extends ClientApiController
         }
 
         if ($driver === 'webdav') {
-            if (trim((string) ($config['url'] ?? '')) === '') {
+            $url = trim((string) ($config['url'] ?? ''));
+
+            if ($url === '') {
                 return 'Enter the WebDAV base URL, for example https://dav.example.com/backups.';
+            }
+
+            if (!filter_var($url, FILTER_VALIDATE_URL)) {
+                return 'The WebDAV URL is not a valid URL.';
+            }
+
+            $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+            if (!in_array($scheme, ['http', 'https'], true)) {
+                return 'The WebDAV URL must use http or https.';
+            }
+
+            if (!app(MysqlBackupSsrfGuard::class)->isAllowed($url)) {
+                return 'The WebDAV URL must resolve to a public address. Set MYSQL_BACKUP_ALLOW_PRIVATE_URLS=true only if you intentionally need an internal WebDAV server.';
             }
 
             return null;
@@ -747,51 +762,21 @@ class DataBaseBackupController extends ClientApiController
             'mega' => ['mega'],
             'pcloud' => ['pcloud'],
             'yandex_disk' => ['yandex'],
-            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
-            default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav'],
+            'rclone' => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav', 's3'],
+            default => ['drive', 'onedrive', 'dropbox', 'box', 'mega', 'pcloud', 'yandex', 'webdav', 's3'],
         };
 
-        return in_array(strtolower($typeMatch[1]), $allowedTypes, true)
+        $type = strtolower($typeMatch[1]);
+
+        // 'local' type allows reading/writing arbitrary files on the panel host.
+        // Never allow it regardless of the driver or default case.
+        if ($type === 'local') {
+            return 'The rclone "local" type is blocked for security. It would allow file access on the panel host.';
+        }
+
+        return in_array($type, $allowedTypes, true)
             ? null
             : 'The rclone config type does not match the selected storage driver.';
-    }
-
-    private function webhookUrlIsAllowed(string $url): bool
-    {
-        if (filter_var(env('MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS', false), FILTER_VALIDATE_BOOLEAN)) {
-            return true;
-        }
-
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
-        if ($host === '' || $host === 'localhost' || str_ends_with($host, '.localhost') || str_ends_with($host, '.local')) {
-            return false;
-        }
-
-        $ips = [];
-        if (filter_var($host, FILTER_VALIDATE_IP)) {
-            $ips[] = $host;
-        } else {
-            foreach ((array) @dns_get_record($host, DNS_A + DNS_AAAA) as $record) {
-                if (!empty($record['ip'])) {
-                    $ips[] = $record['ip'];
-                }
-                if (!empty($record['ipv6'])) {
-                    $ips[] = $record['ipv6'];
-                }
-            }
-        }
-
-        if ($ips === []) {
-            return false;
-        }
-
-        foreach ($ips as $ip) {
-            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private function authorizeServer(Request $request, Server $server, string $constant, string $fallbackAbility): void

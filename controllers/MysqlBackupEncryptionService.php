@@ -99,8 +99,26 @@ class MysqlBackupEncryptionService
         return $targetPath;
     }
 
+    /**
+     * Derive the AES-256 encryption key.
+     *
+     * Uses SHA-256 of the configured key. Admins SHOULD set a dedicated
+     * MYSQL_BACKUP_ENCRYPTION_KEY — without it, the Laravel app key is
+     * used as a fallback, which means compromising the app key also
+     * compromises all encrypted backups. A dedicated key keeps the two
+     * secrets cryptographically independent.
+     */
     private function key(): string
     {
-        return hash('sha256', (string) env('MYSQL_BACKUP_ENCRYPTION_KEY', config('app.key')), true);
+        $key = (string) env('MYSQL_BACKUP_ENCRYPTION_KEY', config('app.key'));
+
+        if ($key === '' || $key === 'null') {
+            throw new RuntimeException(
+                'MYSQL_BACKUP_ENCRYPTION_KEY is not set. Set it in your .env file to a random 32+ character string. ' .
+                'Run: php -r "echo bin2hex(random_bytes(32));" and add the output as MYSQL_BACKUP_ENCRYPTION_KEY=...'
+            );
+        }
+
+        return hash('sha256', $key, true);
     }
 }

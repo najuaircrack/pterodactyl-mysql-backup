@@ -269,7 +269,14 @@ MYSQL_BACKUP_DUMP_PASSWORD=
 MYSQL_BACKUP_DUMP_HOST=
 MYSQL_BACKUP_DUMP_IDLE_TIMEOUT=300
 MYSQL_BACKUP_DISCORD_MAX_ATTACHMENT_BYTES=26214400
-MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=false
+MYSQL_BACKUP_ALLOW_PRIVATE_URLS=false
+```
+
+Generate a strong encryption key:
+
+```bash
+php -r "echo bin2hex(random_bytes(32));"
+# Add to .env as: MYSQL_BACKUP_ENCRYPTION_KEY=<output>
 ```
 
 Most runtime limits are configured in the admin panel. Environment values are used for binary paths, optional defaults, and security overrides.
@@ -316,10 +323,14 @@ Set the credential mode to **Dedicated backup user** in the admin settings and e
 - Storage provider configs including OAuth tokens are encrypted with Laravel `Crypt`.
 - Google Drive / Dropbox / OneDrive OAuth tokens are auto-refreshed server-side. The admin-owned client secret is encrypted and never sent to the frontend.
 - OAuth app credentials are global — they cannot be overridden per-server.
-- Optional backup encryption uses AES-256-GCM.
-- Webhook URLs are blocked if they resolve to private or reserved IP ranges unless `MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=true`.
+- OAuth state is validated against the session CSRF token on callback.
+- Optional backup encryption uses AES-256-GCM. Set `MYSQL_BACKUP_ENCRYPTION_KEY` to a dedicated random value (32+ chars) — without it, encryption falls back to the app key, which means compromising the app key also compromises encrypted backups.
+- Webhook and WebDAV URLs are blocked if they resolve to private, reserved, or link-local IP ranges unless `MYSQL_BACKUP_ALLOW_PRIVATE_URLS=true`.
 - Rclone remotes must use named remotes like `gdrive:path`; inline remotes and parent traversal are rejected.
+- The rclone `local` type is blocked entirely — it would allow file access on the panel host.
 - Generic rclone is disabled by default for new installs.
+- Restore jobs verify that the target database belongs to the same server as the backup record.
+- Database passwords are never passed through `unserialize()` — serialized string passwords are safely parsed without invoking PHP object deserialization.
 
 ---
 

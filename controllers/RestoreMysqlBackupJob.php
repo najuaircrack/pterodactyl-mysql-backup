@@ -38,6 +38,21 @@ class RestoreMysqlBackupJob implements ShouldQueue
         $targetDatabase = Database::query()->with('host')->findOrFail($this->targetDatabaseId);
         $settings = app(MysqlBackupAdminSettingsService::class);
 
+        // Defense in depth: verify the target database belongs to the same
+        // server as the backup record. The controller validates this before
+        // dispatching, but we re-check here so a crafted job payload cannot
+        // restore into a database belonging to a different server.
+        $targetServerId = \Pterodactyl\Models\Server::query()
+            ->whereHas('databases', fn ($q) => $q->where('databases.id', $targetDatabase->id))
+            ->value('id');
+
+        if ((int) $targetServerId !== (int) $record->server_id) {
+            throw new \RuntimeException(
+                'Restore target database does not belong to the same server as the backup record. ' .
+                'Restore cancelled for security reasons.'
+            );
+        }
+
         if (!$this->overwriteConfirmed) {
             throw new \RuntimeException('Restore overwrite confirmation was not provided.');
         }
