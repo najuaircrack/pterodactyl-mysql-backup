@@ -4,17 +4,37 @@ Queue-driven, panel-native MySQL backups for Pterodactyl, packaged as a Blueprin
 
 Made by [@najuaircrack](https://github.com/najuaircrack).
 
+![MySQL Backup Manager](./assets/showcase.png)
+
+<p align="center">
+  <sub>
+    ! This is an AI generated showcase image intended to visually represent all features in one view. 
+    The actual interface may differ slightly.
+  </sub>
+</p>
+
 ## What It Does
 
 - Runs MySQL backups through Laravel queues, not external cron scripts.
 - Creates one queued backup record per database before the worker starts, so manual and scheduled backups are visible immediately.
-- Supports per-server backup policies, intervals in minutes, retention limits, quotas, restore safety backups, and manual cooldowns.
+- Supports per-server backup policies, intervals in minutes, retention limits, storage quotas, restore safety backups, and manual cooldowns.
 - Streams `mysqldump` output directly into compressed `.sql.gz` files.
 - Optionally encrypts backups using AES-256-GCM, producing `.sql.gz.enc`.
 - Imports and lists legacy local backups from existing backup folders.
-- Lets users download, restore, filter, search, and monitor backup progress from the server panel.
+- Lets users download, restore, delete, filter, search, and monitor backup progress from the server panel.
 - Gives admins global defaults, server-specific limits, provider health checks, audit logs, and backup history.
+- Enforces storage quotas at three levels: pre-queue, post-dump (before upload), and post-upload (automatic pruning of oldest backups).
 - Supports local, S3-compatible, FTP, FTPS, SFTP, Google Drive, Dropbox, OneDrive (one-click OAuth), WebDAV (native), and Box, MEGA, pCloud, Yandex Disk, generic rclone (advanced).
+
+## Storage Provider Tiers
+
+| Tier | Providers | User experience |
+|------|-----------|-----------------|
+| One-click OAuth | Google Drive, Dropbox, OneDrive | Click "Connect" → authorise → done. No client ID or secret needed. |
+| Native (no deps) | WebDAV | Enter URL + username + password. |
+| Key-based | S3, AWS S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, DigitalOcean Spaces, Linode, Vultr, Scaleway, Oracle, Google Cloud Storage | Paste access key/secret + bucket + endpoint. |
+| Server credentials | FTP, FTPS, SFTP | Enter host, username, password, port, root path. |
+| Advanced (rclone) | Box, MEGA, pCloud, Yandex Disk, generic rclone | Requires the rclone binary on the panel host + an encrypted rclone config block. |
 
 ## Architecture
 
@@ -22,12 +42,14 @@ The extension is fully panel integrated:
 
 - `MysqlBackupSchedulerService` reconciles due schedules from the database.
 - `MysqlBackupQueueService` creates backup records and dispatches database jobs.
-- `ProcessMysqlDatabaseBackupJob` runs `mysqldump`, compresses, encrypts when enabled, uploads, verifies, notifies, and enforces retention.
+- `ProcessMysqlDatabaseBackupJob` runs `mysqldump`, compresses, encrypts when enabled, enforces quota, uploads, verifies, notifies, and enforces retention.
 - `MysqlBackupStorageManager` abstracts local, S3-style, FTP/SFTP, native WebDAV, rclone, and one-click OAuth (Google Drive, Dropbox, OneDrive) storage.
 - `GoogleDriveOAuthService`, `DropboxOAuthService`, `OneDriveOAuthService` handle OAuth token exchange, refresh, and direct API uploads — no rclone required for these providers.
+- `MysqlBackupRetentionService` enforces retention-by-count, retention-by-days, and quota-based pruning of oldest backups.
+- `MysqlBackupQuotaService` tracks per-server and per-user storage usage and enforces quotas.
 - `MysqlBackupAdminSettingsService` manages global and per-server admin defaults, including admin-owned OAuth app credentials.
-- React server UI handles policy, provider setup, manual backup, restore, download, progress, and history.
-- Blade admin UI handles operational controls, provider testing, server limit overrides, and audits.
+- React server UI handles policy, provider setup, manual backup, restore, download, delete, progress, and history.
+- Blade admin UI handles operational controls, OAuth app configuration, provider testing, server limit overrides, and audits.
 
 ## Requirements
 
@@ -115,6 +137,10 @@ https://your-panel-domain/api/client/extensions/mysqlautobackup/mysql-backups/oa
 4. Authorise in the popup — it closes automatically.
 5. Set the provider as the storage target in the backup configuration.
 
+### Backward Compatibility
+
+Existing Google Drive providers that were configured with per-user client ID/secret continue to work. The service falls back to the stored per-provider credentials when admin-level OAuth app credentials are not set. New providers always use the admin-owned app.
+
 ### Retention
 
 Retention works automatically. When a backup is pruned by the retention policy, the extension calls the provider's API to delete the file. No manual cleanup needed.
@@ -128,6 +154,74 @@ Retention works automatically. When a backup is pruned by the retention policy, 
 **"admin has not configured this provider"** — The admin hasn't entered the OAuth app credentials yet, or the provider is not in the allowed drivers list.
 
 **Popup is blocked** — Allow popups for your panel domain, then click Connect again.
+
+---
+
+## WebDAV Storage
+
+WebDAV is built in natively — no rclone or extra packages required.
+
+1. Admin enables the WebDAV driver in **Admin → MySQL Auto Backup → Build Storage Defaults**.
+2. User clicks **Add Provider**, selects **WebDAV**, and enters:
+   - **WebDAV URL** — the base URL, e.g. `https://dav.example.com/backups`
+   - **Username** and **Password**
+3. The extension handles directory creation (MKCOL), upload (PUT), download (GET), and delete (DELETE) via curl.
+
+---
+
+## Storage Quotas
+
+Quotas are enforced at three levels to prevent any single backup or cumulative usage from exceeding the configured limits:
+
+### 1. Pre-queue check
+
+Before a backup is queued, the extension checks if the server or user has already reached its quota. If so, the backup is rejected immediately with a clear error message.
+
+### 2. Post-dump check (before upload)
+
+After `mysqldump` completes and the compressed file is measured, the extension checks if the backup's own size exceeds the quota. If a single backup is larger than the entire quota, it is rejected before upload — no wasted bandwidth. The error message shows both the backup size and the quota, e.g.:
+
+> This backup is 6.2 GB which exceeds the server quota of 5 GB. The backup was cancelled before upload.
+
+### 3. Post-upload pruning
+
+After a successful upload, if the cumulative usage exceeds the quota, the oldest backups are automatically pruned (file deleted from storage + record removed) until usage drops back under the limit.
+
+### Configuring Quotas
+
+In **Admin → MySQL Auto Backup → Backup Policy**:
+
+- **Server quota (MB)** — per-server storage limit. Set to 0 to disable.
+- **User quota (MB)** — per-user storage limit across all their servers. Leave blank to disable.
+
+Both server and user quotas are enforced independently. A backup must fit within both limits.
+
+---
+
+## Managing Backups
+
+### Download
+
+Click the download icon on any successful or restored backup to download the `.sql.gz` or `.sql.gz.enc` file.
+
+### Restore
+
+1. Select a target database from the dropdown on the backup row.
+2. Click the restore icon.
+3. Confirm the overwrite warning.
+4. The restore is queued and runs through the Laravel queue worker. A safety backup of the target database is created first (unless disabled by the admin).
+
+### Delete
+
+1. Click the trash icon on any successful, failed, or restored backup.
+2. Click **Confirm?** to confirm.
+3. The backup file is deleted from storage and the record is removed.
+
+> Running or restoring backups cannot be deleted until they complete.
+
+### Manual Backup
+
+Click **Manual Backup** to queue an immediate backup of all selected databases. Manual backups are subject to a configurable cooldown to prevent abuse.
 
 ---
 
@@ -149,6 +243,8 @@ MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=false
 
 Most runtime limits are configured in the admin panel. Environment values are used for binary paths, optional defaults, and security overrides.
 
+---
+
 ## Advanced Storage via rclone (Box, MEGA, pCloud, Yandex Disk)
 
 For providers that don't have a native one-click integration, users supply an rclone config block:
@@ -167,6 +263,8 @@ rclone config show myremote
 
 The config is stored encrypted in the database and written to a temporary `0600` file only while a job runs.
 
+---
+
 ## MySQL Permissions
 
 If Pterodactyl database users cannot connect from the panel host, configure a dedicated dump user:
@@ -177,15 +275,22 @@ GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `database_name`.* TO 'ptero_backup'@'
 FLUSH PRIVILEGES;
 ```
 
+Set the credential mode to **Dedicated backup user** in the admin settings and enter the username/password there.
+
+---
+
 ## Security Notes
 
 - Database passwords and storage provider credentials are never sent to the frontend.
 - Storage provider configs including OAuth tokens are encrypted with Laravel `Crypt`.
 - Google Drive / Dropbox / OneDrive OAuth tokens are auto-refreshed server-side. The admin-owned client secret is encrypted and never sent to the frontend.
+- OAuth app credentials are global — they cannot be overridden per-server.
 - Optional backup encryption uses AES-256-GCM.
 - Webhook URLs are blocked if they resolve to private or reserved IP ranges unless `MYSQL_BACKUP_ALLOW_PRIVATE_WEBHOOKS=true`.
 - Rclone remotes must use named remotes like `gdrive:path`; inline remotes and parent traversal are rejected.
 - Generic rclone is disabled by default for new installs.
+
+---
 
 ## Operations
 
@@ -205,6 +310,8 @@ php artisan queue:failed
 php artisan queue:retry all
 ```
 
+---
+
 ## Troubleshooting
 
 **`mysqldump: Got error: 1045 Access denied`**
@@ -222,6 +329,18 @@ chown -R www-data:www-data /var/lib/pterodactyl/backups/databases
 chmod -R 750 /var/lib/pterodactyl/backups/databases
 ```
 
+**Backup rejected for exceeding quota**
+
+The backup's own size is larger than the configured server or user quota. Either increase the quota in the admin settings, reduce the database size, or clean up old backups to free space.
+
+**Quota not enforced / backups go over the limit**
+
+Quotas are checked at three points: before queueing, after the dump (before upload), and after upload (automatic pruning). If a backup was created before these checks were added, it will still count toward usage. Delete old backups manually or let the post-upload pruner catch up on the next backup.
+
 **rclone upload fails (Box, MEGA, pCloud, Yandex Disk, generic rclone)**
 
 Confirm `rclone` is installed, the remote name in the path matches the pasted config block, and the config block includes the correct `type` section. Google Drive, Dropbox, OneDrive, and WebDAV do not use rclone.
+
+**WebDAV upload fails**
+
+Verify the WebDAV URL is reachable from the panel host, credentials are correct, and the server supports PUT/MKCOL/DELETE methods. Some WebDAV servers require HTTPS — ensure the URL uses `https://`.
