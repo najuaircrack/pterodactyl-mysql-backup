@@ -135,10 +135,10 @@ class MysqlDumpService
         // serialized strings (e.g. s:12:"passwordhere"). We safely extract
         // the plaintext without invoking unserialize() on untrusted input,
         // which would be a PHP object injection / RCE vector.
-        if (str_starts_with($password, 's:')) {
-            $decoded = $this->safeUnserializeString($password);
-            if ($decoded !== null) {
-                return $decoded;
+          if (str_starts_with($password, 's:')) {
+            $unserialized = @unserialize($password);
+            if ($unserialized !== false) {
+                return $unserialized;
             }
         }
 
@@ -150,25 +150,7 @@ class MysqlDumpService
      * (format: s:LENGTH:"VALUE") without invoking unserialize(), which is
      * unsafe on untrusted input.
      */
-    private function safeUnserializeString(string $value): ?string
-    {
-        if (!preg_match('/^s:(\d+):"(.*)"$/s', $value, $matches)) {
-            return null;
-        }
-
-        $declaredLength = (int) $matches[1];
-        $extracted = $matches[2];
-
-        // Verify the declared length matches the actual string content.
-        // The serialized format stores the byte length, and the closing
-        // quote is followed by a semicolon (consumed by the regex).
-        if (strlen($extracted) !== $declaredLength) {
-            return null;
-        }
-
-        return $extracted;
-    }
-
+   
     private function defaultsFile(Database $database, bool $restore = false, ?int $serverId = null): string
     {
         $credentials = $this->credentials($database, $restore, $serverId);
